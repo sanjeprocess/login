@@ -17,7 +17,7 @@ export function PaymentPage() {
   const requestNo = params.get('req') || '';
   const { session, setSession, expired } = useSession(sessionKey('payment', requestNo));
   if (!requestNo) return <LinkError code="LINK_INVALID" />;
-  if (!session) return <OtpGate purpose="insurer_signin" requestNo={requestNo} onVerified={setSession} sessionEnded={expired} context={`Request ${requestNo}`} />;
+  if (!session) return <OtpGate purpose="insurer_signin" requestNo={requestNo} screen="payment"onVerified={setSession} sessionEnded={expired} context={`Request ${requestNo}`} />;
   return <Payment requestNo={requestNo} session={session} onSessionEnd={() => setSession(null)} />;
 }
 

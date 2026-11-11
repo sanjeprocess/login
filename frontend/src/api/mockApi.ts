@@ -117,7 +117,7 @@ export class MockApi implements GatewayApi {
     const expiresAt = new Date(Date.now() + 30 * 60 * 1000).toISOString();
     const user =
       p.purpose === 'finance_signin'
-        ? { name: 'Nadeesha Fernando', email, role: 'finance' as const, partner: 'Northgate Finance PLC', branch: 'Kandy City' }
+        ? { name: 'Nadeesha Fernando', email, role: 'finance' as const, partner: 'FP-01' }
         : { name: 'Dilani Wickramasinghe', email, role: 'insurer' as const, insurer: 'Insurer A', department: 'Underwriting' };
     return this.wait({ token: `mock-${p.purpose}-${Date.now()}`, user, expiresAt });
   }

@@ -14,6 +14,7 @@ const envSchema = z.object({
   WH24_TENANT_ID: z.string().default(''),
   WH24_WF01_ID: z.string().default(''),
   WH24_WF02_ID: z.string().default(''),
+  SMS_MOBILE_FORMAT: z.enum(['e164', 'intl', 'local']).default('intl'),
   WH24_VIEW_FINANCE_USERS: z.string().default(''),
   WH24_VIEW_INSURER_USERS: z.string().default(''),
   WH24_VIEW_INSURERS: z.string().default(''),

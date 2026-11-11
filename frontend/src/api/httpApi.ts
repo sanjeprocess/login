@@ -12,6 +12,7 @@ import {
   type Purpose,
   type RequestPayload,
   type Session,
+  type SignInScreen,
   type VerifyCustomerOtpResult,
 } from './types';
 
@@ -51,10 +52,10 @@ export class HttpApi implements GatewayApi {
     return encodeURIComponent(no);
   }
 
-  requestOtp(p: { email: string; purpose: Purpose; requestNo?: string }) {
+  requestOtp(p: { email: string; purpose: Purpose; requestNo?: string; screen?: SignInScreen }) {
     return this.call<{ resendAfterSeconds: number }>('POST', '/auth/otp/request', { body: p });
   }
-  verifyOtp(p: { email: string; code: string; purpose: Purpose; requestNo?: string }) {
+  verifyOtp(p: { email: string; code: string; purpose: Purpose; requestNo?: string; screen?: SignInScreen }) {
     return this.call<Session>('POST', '/auth/otp/verify', { body: p });
   }
 

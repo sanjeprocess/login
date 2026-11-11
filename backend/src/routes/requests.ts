@@ -5,6 +5,8 @@ import { ApiError } from '../errors.js';
 import { requireSession } from '../auth/middleware.js';
 import { getItemByRequestNo } from '../services/requestService.js';
 import type { WorkHub24Client } from '../wh24/client.js';
+import { formatSmsMobile } from '../wh24/mobileFormat.js';
+import { REQUEST_STATUS } from '../wh24/fields.js';
 
 const requestSchema = z.object({
   customer: z.object({
@@ -43,7 +45,64 @@ const requestSchema = z.object({
   consent: z.literal(true)
 });
 
-const chassisCheckSchema = z.object({});
+export type RequestBody = z.infer<typeof requestSchema>;
+export { requestSchema };
+
+export type Wh24DateTimeStyle = 'micro' | 'isoZ';
+/** Style for WF-01 requestDate (A2), a WH24 datetime. Confirmed with `npm run probe -- createbisect`. */
+export const REQUEST_DATE_STYLE: Wh24DateTimeStyle = 'micro';
+
+/** "micro": "2026-11-11T11:33:33.000000" (UTC, as WH24 returns createdDate); "isoZ": "2026-11-11T11:33:33.000Z". */
+export function formatWh24DateTime(date: Date, style: Wh24DateTimeStyle = REQUEST_DATE_STYLE): string {
+  const iso = date.toISOString();
+  return style === 'isoZ' ? iso : `${iso.slice(0, 19)}.${iso.slice(20, 23)}000`;
+}
+
+/** WF-01 create-card fields (design ids) for a Screen 1 request. Shared with the probe script. */
+export function buildRequestCardFields(
+  body: RequestBody,
+  sessionUser: { partner?: string; name: string; email: string },
+  now = formatWh24DateTime(new Date())
+): Record<string, unknown> {
+  const chassisNo = body.vehicle.chassisNo;
+  const mobileDigits = body.customer.mobile.replace(/\D/g, '');
+  return {
+    title: `${body.customer.name} · ${chassisNo}`,
+    A2: now,
+    A3: REQUEST_STATUS.awaitingQuotes,
+    A4: sessionUser.partner,
+    A6: sessionUser.name,
+    A7: sessionUser.email,
+    B2: body.customer.name,
+    B3: body.customer.idNumber,
+    B4: formatSmsMobile(body.customer.mobile),
+    B5: body.customer.email ?? '',
+    B6: body.customer.address,
+    B7: `●●● ●●● ${mobileDigits.slice(-4)}`,
+    B1: body.customer.type,
+    C1: body.vehicle.category,
+    C2: body.vehicle.make,
+    C3: body.vehicle.model,
+    C4: body.vehicle.year,
+    C5: body.vehicle.condition,
+    C6: body.vehicle.registrationNo ?? '',
+    C7: body.vehicle.chassisNo,
+    C8: body.vehicle.engineNo,
+    C9: body.vehicle.value,
+    C10: body.vehicle.usage,
+    D1: body.finance.facilityType,
+    D2: body.finance.referenceNo,
+    D3: body.finance.amount,
+    D4: body.finance.tenureMonths,
+    E1: body.cover.coverType,
+    E2: body.cover.sumInsured,
+    // optionalCovers is a WH24 text field: comma-separated, "" when none.
+    E3: body.cover.optionalCovers.join(', '),
+    E4: body.cover.policyStartDate,
+    E5: body.consent,
+    E6: body.cover.remarks ?? ''
+  };
+}
 
 function createVehicleSummary(item: Record<string, unknown>) {
   const make = String(item.C2 ?? '');
@@ -51,12 +110,21 @@ function createVehicleSummary(item: Record<string, unknown>) {
   return `${make} ${model}`.trim();
 }
 
+let warnedNoChassisLookup = false;
+
 async function hasOpenChassisDuplicate(wh24Client: WorkHub24Client, chassisNo: string): Promise<boolean> {
+  if (!wh24Client.findRequestByChassis) {
+    // Non-blocking: no working card search on this tenant, so the check is skipped.
+    if (!warnedNoChassisLookup) {
+      warnedNoChassisLookup = true;
+      console.warn('Duplicate-chassis check skipped: WorkHub24 has no working card search on this tenant.');
+    }
+    return false;
+  }
   try {
-    const existing = await wh24Client.findItemByField('WF-01', 'C7', chassisNo);
-    if (!existing) return false;
-    const item = await wh24Client.getItem(existing.itemId);
-    return String(item.fields.A3 ?? '') !== 'Completed';
+    const item = await wh24Client.findRequestByChassis(chassisNo);
+    if (!item) return false;
+    return String(item.fields.A3 ?? '') !== REQUEST_STATUS.completed;
   } catch (error) {
     console.warn('WorkHub24 chassis duplicate check failed; allowing the request to continue.', {
       chassisNo,
@@ -88,45 +156,7 @@ export function createRequestsRoutes(wh24Client: WorkHub24Client) {
       }
 
       const sessionUser = (req as any).session.user;
-      const now = new Date().toISOString().slice(0, 10);
-      const mobileDigits = body.customer.mobile.replace(/\D/g, '');
-
-      const created = await wh24Client.createItem('WF-01', {
-        title: `${body.customer.name} · ${chassisNo}`,
-        A2: now,
-        A3: 'Awaiting Quotes',
-        A4: sessionUser.partner,
-        A5: sessionUser.branch,
-        A6: sessionUser.name,
-        A7: sessionUser.email,
-        B2: body.customer.name,
-        B3: body.customer.idNumber,
-        B4: body.customer.mobile,
-        B5: body.customer.email ?? '',
-        B6: body.customer.address,
-        B7: `●●● ●●● ${mobileDigits.slice(-4)}`,
-        B1: body.customer.type,
-        C1: body.vehicle.category,
-        C2: body.vehicle.make,
-        C3: body.vehicle.model,
-        C4: body.vehicle.year,
-        C5: body.vehicle.condition,
-        C6: body.vehicle.registrationNo ?? '',
-        C7: body.vehicle.chassisNo,
-        C8: body.vehicle.engineNo,
-        C9: body.vehicle.value,
-        C10: body.vehicle.usage,
-        D1: body.finance.facilityType,
-        D2: body.finance.referenceNo,
-        D3: body.finance.amount,
-        D4: body.finance.tenureMonths,
-        E1: body.cover.coverType,
-        E2: body.cover.sumInsured,
-        E3: body.cover.optionalCovers,
-        E4: body.cover.policyStartDate,
-        E5: body.consent,
-        E6: body.cover.remarks ?? ''
-      });
+      const created = await wh24Client.createItem('WF-01', buildRequestCardFields(body, sessionUser));
       if (!created.title?.trim()) {
         console.warn('WorkHub24 created a WF-01 card without a title.', { itemId: created.itemId });
       }

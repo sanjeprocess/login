@@ -19,7 +19,7 @@ export function BindingPage() {
   const requestNo = params.get('req') || '';
   const { session, setSession, expired } = useSession(sessionKey('binding', requestNo));
   if (!requestNo) return <LinkError code="LINK_INVALID" />;
-  if (!session) return <OtpGate purpose="insurer_signin" requestNo={requestNo} onVerified={setSession} sessionEnded={expired} context={`Request ${requestNo}`} />;
+  if (!session) return <OtpGate purpose="insurer_signin" requestNo={requestNo} screen="binding"onVerified={setSession} sessionEnded={expired} context={`Request ${requestNo}`} />;
   return <Binding requestNo={requestNo} session={session} onSessionEnd={() => setSession(null)} />;
 }
 

@@ -37,6 +37,7 @@ Any non-2xx response returns:
 ```
 
 - `purpose`: `finance_signin` or `insurer_signin`. `requestNo` is sent on every screen except Start Request.
+- `screen` (optional, also on `/auth/otp/verify`): `response` (Screen 2), `compare` (Screen 3 and customer OTP), `binding` (Screen 4) or `payment`. When `requestNo` is sent, the backend checks that the screen's WF-01 task is open before sending a code: Screen 2 `Awaiting Insurer Responses`, Screen 3 `Awaiting Package Selection`, customer OTP `Awaiting OTP Verification`, Screen 4 `Awaiting Policy Upload`. No open task returns `ALREADY_SUBMITTED` (`REQUEST_CLOSED` if Status is `Completed`) and no code is sent. Without `screen`, the task is inferred from whether a package has been selected.
 - Look up the email in ds_finance_user or ds_insurer_user. If found, generate a 6-digit code, store its hash with a 5-minute expiry, and start WF-02 Send OTP.
 - Always return 200 whether or not the email exists, so nobody can test emails.
 - If `requestNo` is given and invalid, return LINK_INVALID / NOT_AUTHORISED / REQUEST_CLOSED.
@@ -59,7 +60,7 @@ Response (`Session`):
 }
 ```
 
-Finance users get `partner` and `branch` instead of `insurer`. Sessions last 30 minutes. For insurers, the token only works for the `requestNo` it was issued for.
+Finance users get `partner` instead of `insurer`. Sessions last 30 minutes. For insurers, the token only works for the `requestNo` it was issued for.
 
 ## Screen 1: Start Request (finance user)
 

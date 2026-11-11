@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "probe": "tsx scripts/probe-wh24.ts",
+    "e2e": "tsx scripts/e2e-wh24.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

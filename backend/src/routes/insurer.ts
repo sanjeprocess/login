@@ -10,10 +10,22 @@ import { ApiError } from '../errors.js';
 import { requireSession } from '../auth/middleware.js';
 import { getItemByRequestNo, getRequestSummary } from '../services/requestService.js';
 import { requireOpenTask } from '../services/taskAccess.js';
-import { calculatePremiumBreakdown } from '../services/matching.js';
-import { JsonOffersRepository, type OffersRepository, type StoredOffer } from '../services/offersStore.js';
+import {
+  isRecommendable,
+  normalizePackageRow,
+  packageBelongsTo,
+  priceForPackage,
+  type PackageRow
+} from '../services/matching.js';
+import { JsonOffersRepository, type OffersRepository } from '../services/offersStore.js';
 import type { WorkHub24Client } from '../wh24/client.js';
+import { FIELD_MAP, REQUEST_STATUS } from '../wh24/fields.js';
 import { config } from '../config.js';
+
+// "Current Package Insurer Code" (WF-01). Written only once its API key is in
+// config/wf01-field-map.json: an unmapped id would be sent to WH24 as the raw id.
+export const CURRENT_PACKAGE_INSURER_CODE = 'G7a';
+let warnedInsurerCodeUnmapped = false;
 
 const responseSchema = z.union([
   z.object({ mode: z.literal('stored'), packageRef: z.string().min(1), remarks: z.string().optional() }),
@@ -51,53 +63,43 @@ function getInsurerName(req: Request): string {
   return String(session?.user?.insurer ?? '');
 }
 
+function getInsurerIdentity(req: Request): { name: string; code: string } {
+  const session = (req as Request & { session?: { user?: { insurer?: string; insurerCode?: string } } }).session;
+  return { name: String(session?.user?.insurer ?? ''), code: String(session?.user?.insurerCode ?? '') };
+}
+
 function getRequestNo(req: Request): string {
   const requestNo = req.params.requestNo;
   return typeof requestNo === 'string' ? requestNo : requestNo?.[0] ?? '';
 }
 
-function asOptionalCovers(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map(String);
-  return String(value ?? '').split(',').map((cover) => cover.trim()).filter(Boolean);
-}
-
-function packageDetails(row: Record<string, unknown>, sumInsured: number) {
-  const premiumRate = Number(row.premium_rate ?? row.rate);
-  const taxRate = Number(row.tax_rate);
-  if (!Number.isFinite(premiumRate) || !Number.isFinite(taxRate)) {
-    throw new Error('The package view row is missing a valid premium_rate or tax_rate.');
-  }
-  const breakdown = calculatePremiumBreakdown(sumInsured, premiumRate, taxRate);
+function packageDetails(pkg: PackageRow, sumInsured: number) {
+  const breakdown = priceForPackage(pkg, sumInsured);
   return {
-    packageRef: String(row.package_ref ?? ''),
-    name: String(row.name ?? row.package_ref ?? ''),
-    premiumRate,
+    packageRef: pkg.packageRef,
+    name: pkg.name,
+    premiumRate: pkg.premiumRate,
     premium: breakdown.premium,
     taxes: breakdown.taxes,
     total: breakdown.total,
-    excess: Number(row.excess ?? 0),
-    standardCovers: String(row.standard_covers ?? ''),
-    optionalCovers: asOptionalCovers(row.optional_covers),
-    validUntil: String(row.valid_to ?? '')
+    excess: pkg.excess,
+    standardCovers: pkg.standardCovers,
+    optionalCovers: pkg.optionalCovers,
+    validUntil: pkg.validTo
   };
 }
 
-function packageView(rows: Record<string, unknown>[], insurer: string, item: { fields: Record<string, unknown> }) {
+function recommendedPackages(packages: PackageRow[], insurer: { name: string; code: string }, item: { fields: Record<string, unknown> }) {
   const vehicleCategory = String(item.fields.C1 ?? '');
   const coverType = String(item.fields.E1 ?? '');
   const sumInsured = Number(item.fields.E2 ?? 0);
-  return rows
-    .filter((row) => {
-      const validTo = String(row.valid_to ?? '');
-      return String(row.insurer ?? '') === insurer &&
-        String(row.vehicle_category ?? '') === vehicleCategory &&
-        String(row.cover_type ?? '') === coverType &&
-        Number(row.sum_min ?? 0) <= sumInsured &&
-        sumInsured <= Number(row.sum_max ?? Number.MAX_SAFE_INTEGER) &&
-        Boolean(validTo) &&
-        new Date(validTo) >= new Date();
-    })
-    .map((row) => packageDetails(row, sumInsured));
+  return packages.filter((pkg) =>
+    packageBelongsTo(pkg, insurer) && isRecommendable(pkg, vehicleCategory, coverType, sumInsured)
+  );
+}
+
+async function loadPackages(client: WorkHub24Client): Promise<PackageRow[]> {
+  return (await client.queryDatastore('ds_package', {})).map(normalizePackageRow);
 }
 
 function getSessionUser(req: Request): { name: string; email: string } {
@@ -133,46 +135,19 @@ export function createInsurerRoutes(
       const requestItem = await getItemByRequestNo(wh24Client, requestNo);
       if (!requestItem) throw new ApiError('LINK_INVALID', 'Request link is invalid.');
       const insurerName = getInsurerName(req);
-      const previousOffers = await offersRepository.get(requestNo);
-      const submissionOffer = previousOffers.find((offer) => offer.insurer === insurerName);
+      // The open task is the only gate. A stored offer is written only after the task completes,
+      // so an offer seen while the task is still open is a half-finished attempt and may be resubmitted.
       await requireOpenTask(wh24Client, requestItem, 'Awaiting Insurer Responses');
-      const rows = await wh24Client.queryDatastore('ds_package', {});
-      const recommended = packageView(rows, insurerName, requestItem);
-      const submittedPackage = submissionOffer
-        ? rows.find((row) => String(row.package_ref ?? '') === submissionOffer.packageRef)
-        : undefined;
+      const packages = await loadPackages(wh24Client);
       const sumInsured = Number(requestItem.fields.E2 ?? 0);
-      const packageInfo = submittedPackage
-        ? packageDetails(submittedPackage, sumInsured)
-        : submissionOffer
-          ? {
-              packageRef: submissionOffer.packageRef,
-              name: String(requestItem.fields.G9 ?? submissionOffer.packageRef),
-              premiumRate: Number(requestItem.fields.G14 ?? 0),
-              premium: Number(((sumInsured * Number(requestItem.fields.G14 ?? 0)) / 100).toFixed(2)),
-              taxes: Number((((sumInsured * Number(requestItem.fields.G14 ?? 0)) / 100 * Number(requestItem.fields.G15 ?? 0)) / 100).toFixed(2)),
-              total: Number((((sumInsured * Number(requestItem.fields.G14 ?? 0)) / 100) *
-                (1 + Number(requestItem.fields.G15 ?? 0) / 100)).toFixed(2)),
-              excess: Number(requestItem.fields.G16 ?? 0),
-              validUntil: String(requestItem.fields.G18 ?? ''),
-              standardCovers: String(requestItem.fields.G17 ?? ''),
-              optionalCovers: asOptionalCovers(requestItem.fields.G21)
-            }
-          : undefined;
-      const submission = submissionOffer && packageInfo
-        ? {
-            submittedBy: submissionOffer.respondedBy,
-            submittedAt: submissionOffer.respondedAt,
-            package: packageInfo
-          }
-        : undefined;
+      const recommended = recommendedPackages(packages, getInsurerIdentity(req), requestItem)
+        .map((pkg) => packageDetails(pkg, sumInsured));
 
       return res.json({
         request: getRequestSummary(requestItem.fields),
         insurerName,
         recommended,
-        vehicleCategories: [...new Set(rows.map((row) => String(row.vehicle_category ?? '')).filter(Boolean))],
-        ...(submission ? { submission } : {})
+        vehicleCategories: [...new Set(packages.map((pkg) => pkg.vehicleCategory).filter(Boolean))]
       });
     } catch (error) {
       return next(error);
@@ -185,32 +160,25 @@ export function createInsurerRoutes(
       const requestNo = getRequestNo(req);
       const requestItem = await getItemByRequestNo(wh24Client, requestNo);
       if (!requestItem) throw new ApiError('LINK_INVALID', 'Request link is invalid.');
-      const status = String(requestItem.fields.A3 ?? '');
-      if (status === 'Completed') throw new ApiError('REQUEST_CLOSED', 'This request has already been completed.');
-      if (status !== 'Awaiting Quotes') {
-        throw new ApiError('ALREADY_SUBMITTED', 'This step is not available for this request.');
-      }
+      // Access is decided by the open WF-01 task, not by Status. updateAndCompleteTask
+      // checks again under the card lock before writing.
+      await requireOpenTask(wh24Client, requestItem, 'Awaiting Insurer Responses');
 
       const insurerName = getInsurerName(req);
       const sumInsured = Number(requestItem.fields.E2 ?? 0);
       let packageRef: string;
       let packageFields: Record<string, unknown>;
       if (body.mode === 'stored') {
-        const rows = await wh24Client.queryDatastore('ds_package', {});
-        const recommended = packageView(rows, insurerName, requestItem);
-        const selected = recommended.find((candidate) => candidate.packageRef === body.packageRef);
-        const selectedRow = rows.find((row) =>
-          String(row.insurer ?? '') === insurerName &&
-          String(row.package_ref ?? '') === body.packageRef &&
-          String(row.vehicle_category ?? '') === String(requestItem.fields.C1 ?? '') &&
-          String(row.cover_type ?? '') === String(requestItem.fields.E1 ?? '')
-        );
-        if (!selected || !selectedRow) {
+        const packages = await loadPackages(wh24Client);
+        const selected = recommendedPackages(packages, getInsurerIdentity(req), requestItem)
+          .find((pkg) => pkg.packageRef === body.packageRef);
+        if (!selected) {
           throw new ApiError('VALIDATION', 'Selected package not found for insurer.', {
             fields: { packageRef: 'Unknown or unavailable package.' }
           });
         }
-        packageRef = String(selectedRow.package_ref ?? '');
+        packageRef = selected.packageRef;
+        // Existing package: only flag it. The package itself is already in the packages store.
         packageFields = { G19: 'No' };
       } else {
         if (body.package.coverType !== String(requestItem.fields.E1 ?? '') ||
@@ -225,7 +193,8 @@ export function createInsurerRoutes(
             fields: { package: 'Package range must include the request sum insured.' }
           });
         }
-        packageRef = `${insurerCode(insurerName)}-NEW-${requestNo}`;
+        const identity = getInsurerIdentity(req);
+        packageRef = `${insurerCode(identity.code || insurerName)}-NEW-${requestNo}`;
         const premiumRate = body.package.premiumRate;
         const premium = (sumInsured * premiumRate) / 100;
         const taxRate = premium === 0 ? 0 : Number(((body.package.taxes / premium) * 100).toFixed(4));
@@ -245,24 +214,42 @@ export function createInsurerRoutes(
           G19: 'Yes',
           G21: body.package.optionalCovers
         };
+        if (FIELD_MAP[CURRENT_PACKAGE_INSURER_CODE]) {
+          packageFields[CURRENT_PACKAGE_INSURER_CODE] = identity.code;
+        } else if (!warnedInsurerCodeUnmapped) {
+          warnedInsurerCodeUnmapped = true;
+          console.warn(`Current Package Insurer Code not written: add "${CURRENT_PACKAGE_INSURER_CODE}" to config/wf01-field-map.json once its key is confirmed.`);
+        }
       }
 
-      await wh24Client.updateAndCompleteTask(
-        requestItem.itemId,
-        'Awaiting Insurer Responses',
-        async () => {
-          const user = getSessionUser(req);
-          const result = await offersRepository.add({
-            requestNo,
-            insurer: insurerName,
-            packageRef,
-            respondedBy: user.email || user.name,
-            respondedAt: new Date().toISOString()
-          });
-          if (!result.added) throw new ApiError('ALREADY_SUBMITTED', 'This insurer has already submitted a response.');
-          return packageFields;
-        }
-      );
+      // WH24 first: if the PUT or the task completion fails, nothing is stored and the insurer
+      // can retry. An offer left by an earlier half-finished attempt (task still open) is overwritten.
+      await wh24Client.updateAndCompleteTask(requestItem.itemId, 'Awaiting Insurer Responses', () => ({
+        ...packageFields,
+        // Each request has exactly one insurer, so this first response is also the last one:
+        // the request is now waiting for package selection.
+        A3: REQUEST_STATUS.awaitingSelection
+      }));
+
+      const user = getSessionUser(req);
+      try {
+        await offersRepository.save({
+          requestNo,
+          insurer: insurerName,
+          packageRef,
+          respondedBy: user.email || user.name,
+          respondedAt: new Date().toISOString()
+        });
+      } catch (error) {
+        // The WH24 task is already complete, so a retry would be refused. Log enough to repair it.
+        console.error('Insurer response was completed in WorkHub24 but the offer could not be stored.', {
+          requestNo,
+          insurer: insurerName,
+          packageRef,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        throw error;
+      }
 
       return res.status(204).send();
     } catch (error) {
@@ -371,7 +358,8 @@ export function createInsurerRoutes(
             J3: fields.policyNumber,
             J4: fields.policyStartDate,
             J5: fields.policyExpiryDate,
-            J7: remarks
+            J7: remarks,
+            A3: REQUEST_STATUS.completed
           };
         }
       );

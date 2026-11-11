@@ -2,14 +2,15 @@
 
 export type Purpose = 'finance_signin' | 'insurer_signin';
 
+/** Linked screen a sign-in is for; the backend checks that screen's WorkHub24 task is open before sending a code. */
+export type SignInScreen = 'response' | 'compare' | 'binding' | 'payment';
+
 export interface SessionUser {
   name: string;
   email: string;
   role: 'finance' | 'insurer';
   /** Finance partner name (finance users) */
   partner?: string;
-  /** Branch name (finance users) */
-  branch?: string;
   /** Insurer name (insurer users) */
   insurer?: string;
   /** Department label shown in the header, e.g. "Underwriting" */
@@ -220,8 +221,8 @@ export class ApiError extends Error {
 
 /** Everything the screens need from the backend. Implemented by HttpApi and MockApi. */
 export interface GatewayApi {
-  requestOtp(p: { email: string; purpose: Purpose; requestNo?: string }): Promise<{ resendAfterSeconds: number }>;
-  verifyOtp(p: { email: string; code: string; purpose: Purpose; requestNo?: string }): Promise<Session>;
+  requestOtp(p: { email: string; purpose: Purpose; requestNo?: string; screen?: SignInScreen }): Promise<{ resendAfterSeconds: number }>;
+  verifyOtp(p: { email: string; code: string; purpose: Purpose; requestNo?: string; screen?: SignInScreen }): Promise<Session>;
 
   checkChassis(token: string, chassisNo: string): Promise<{ exists: boolean }>;
   submitRequest(token: string, payload: RequestPayload): Promise<{ requestNo: string }>;

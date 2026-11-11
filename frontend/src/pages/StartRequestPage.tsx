@@ -107,7 +107,7 @@ export function StartRequestPage() {
   return <RequestForm token={session.token} user={session.user} expiresAt={session.expiresAt} onSessionEnd={() => setSession(null)} />;
 }
 
-function RequestForm(p: { token: string; user: { name: string; email: string; partner?: string; branch?: string }; expiresAt: string; onSessionEnd: () => void }) {
+function RequestForm(p: { token: string; user: { name: string; email: string; partner?: string }; expiresAt: string; onSessionEnd: () => void }) {
   const api = useApi();
   const f = useForm(EMPTY);
   const [view, setView] = useState<'step' | 'review' | 'submitted'>('step');
@@ -291,7 +291,7 @@ function RequestForm(p: { token: string; user: { name: string; email: string; pa
     goStep(0);
   }
 
-  const partner = [p.user.partner, p.user.branch].filter(Boolean).join(' · ');
+  const partner = p.user.partner ?? '';
   const sessionInfo = { email: p.user.email, expiresAt: p.expiresAt };
 
   /* ---------- submitted ---------- */

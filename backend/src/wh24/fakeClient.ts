@@ -1,5 +1,6 @@
 import { ApiError } from '../errors.js';
-import type { WorkHub24Card, WorkHub24Client } from './client.js';
+import { completeAfterUpdate, type TaskLookupOptions, type WorkHub24Card, type WorkHub24Client } from './client.js';
+import { REQUEST_STATUS } from './fields.js';
 
 export class FakeWorkHub24Client implements WorkHub24Client {
   private items = new Map<string, { itemId: string; workflow: 'WF-01' | 'WF-02'; fields: Record<string, unknown>; tables: Record<string, Record<string, unknown>[]>; taskId?: string; taskName?: string; lastUpdatedDate: string; openTask?: { taskId: string; stepId: string } }>();
@@ -16,75 +17,89 @@ export class FakeWorkHub24Client implements WorkHub24Client {
   }
 
   private seed() {
+    this.datastores.set('ds_finance_partner', [
+      { iD: 1, name: 'Northgate Finance PLC', partnerCode: 'FP-01', status: 'Active' }
+    ]);
     this.datastores.set('ds_finance_user', [
       {
+        active: 'Yes',
         email: 'nadeesha.fernando@northgate.lk',
+        iD: 1,
+        mobile: '+94770000001',
         name: 'Nadeesha Fernando',
-        partner: 'Northgate Finance PLC',
-        branch: 'Kandy City',
-        mobile: '+94770000001'
+        partnerCode: 'FP-01',
+        userCode: 'FU-01'
       }
     ]);
 
+    // Row shapes match the real views (npm run probe -- views); numeric package columns are strings.
     this.datastores.set('ds_insurer_user', [
       {
+        active: 'Yes',
         email: 'dilani.w@insurer-a.lk',
+        iD: 1,
+        insurerCode: 'INSA',
+        mobile: '+94770000002',
         name: 'Dilani Wickramasinghe',
-        insurer: 'Insurer A',
-        department: 'Underwriting',
-        mobile: '+94770000002'
+        userCode: 'IU-01'
       }
     ]);
 
+    this.datastores.set('ds_insurer', [
+      { active: 'Yes', apiUrl: '', connectionType: 'Webform', contactEmail: 'quotes@insurer-a.lk', iD: 1, insurerCode: 'INSA', name: 'Insurer A' },
+      { active: 'Yes', apiUrl: '', connectionType: 'Webform', contactEmail: 'quotes@insurer-b.lk', iD: 2, insurerCode: 'INSB', name: 'Insurer B' }
+    ]);
+
+    const packageRow = (row: Record<string, string>) => ({ iD: 0, status: 'Active', sourceRequestNo: null, ...row });
     this.datastores.set('ds_package', [
-      {
-        package_ref: 'A-COMP-STD',
-        insurer: 'Insurer A',
+      packageRow({
+        packageRef: 'A-COMP-STD',
+        insurerCode: 'INSA',
+        insurerName: 'Insurer A',
         name: 'A-COMP-STD',
-        vehicle_category: 'Motor car',
-        cover_type: 'Comprehensive',
-        sum_min: 1000000,
-        sum_max: 15000000,
-        rate: 2.8,
-        tax_rate: 21,
-        excess: 25000,
-        valid_to: '2026-12-31',
-        standard_covers: 'Basic cover',
-        optional_covers: 'SRCC',
-        premium_rate: 2.8
-      },
-      {
-        package_ref: 'A-COMP-PLUS',
-        insurer: 'Insurer A',
+        vehicleCategory: 'Motor car',
+        coverType: 'Comprehensive',
+        sumMin: '1000000',
+        sumMax: '15000000',
+        premiumRate: '2.8',
+        taxRate: '21',
+        excess: '25000',
+        validTo: '2026-12-31',
+        standardCovers: 'Basic cover',
+        optionalCovers: 'SRCC'
+      }),
+      packageRow({
+        packageRef: 'A-COMP-PLUS',
+        insurerCode: 'INSA',
+        insurerName: 'Insurer A',
         name: 'A-COMP-PLUS',
-        vehicle_category: 'Motor car',
-        cover_type: 'Comprehensive',
-        sum_min: 1000000,
-        sum_max: 20000000,
-        rate: 3.1,
-        tax_rate: 21,
-        excess: 15000,
-        valid_to: '2027-01-31',
-        standard_covers: 'Extended cover',
-        optional_covers: 'SRCC',
-        premium_rate: 3.1
-      },
-      {
-        package_ref: 'B-COMP-01',
-        insurer: 'Insurer B',
+        vehicleCategory: 'Motor car',
+        coverType: 'Comprehensive',
+        sumMin: '1000000',
+        sumMax: '20000000',
+        premiumRate: '3.1',
+        taxRate: '21',
+        excess: '15000',
+        validTo: '2027-01-31',
+        standardCovers: 'Extended cover',
+        optionalCovers: 'SRCC'
+      }),
+      packageRow({
+        packageRef: 'B-COMP-01',
+        insurerCode: 'INSB',
+        insurerName: 'Insurer B',
         name: 'B-COMP-01',
-        vehicle_category: 'Motor car',
-        cover_type: 'Comprehensive',
-        sum_min: 2000000,
-        sum_max: 12000000,
-        rate: 2.7,
-        tax_rate: 21,
-        excess: 30000,
-        valid_to: '2027-01-31',
-        standard_covers: 'Basic cover',
-        optional_covers: 'Roadside',
-        premium_rate: 2.7
-      }
+        vehicleCategory: 'Motor car',
+        coverType: 'Comprehensive',
+        sumMin: '2000000',
+        sumMax: '12000000',
+        premiumRate: '2.7',
+        taxRate: '21',
+        excess: '30000',
+        validTo: '2027-01-31',
+        standardCovers: 'Basic cover',
+        optionalCovers: 'Roadside'
+      })
     ]);
 
     const baseItem = {
@@ -92,10 +107,9 @@ export class FakeWorkHub24Client implements WorkHub24Client {
       workflow: 'WF-01' as const,
       fields: {
         A1: 'MIG-2026-0148',
-        A2: '2026-11-09',
-        A3: 'Awaiting Quotes',
+        A2: '2026-11-09T08:00:00.000000',
+        A3: REQUEST_STATUS.awaitingQuotes,
         A4: 'Northgate Finance PLC',
-        A5: 'Kandy City',
         A6: 'Nadeesha Fernando',
         A7: 'nadeesha.fernando@northgate.lk',
         B2: 'Saman Silva',
@@ -122,7 +136,9 @@ export class FakeWorkHub24Client implements WorkHub24Client {
         E4: '2026-11-10',
         E5: 'Initial request',
         E6: true,
-        F1: ['Insurer A', 'Insurer B', 'Insurer C'],
+        // The insurer loop's current insurer; selectedInsurers (F1) is not returned by the API.
+        G4: 'Insurer A',
+        G5: 'quotes@insurer-a.lk',
         'H1.insurer': 'Insurer C',
         'H1.packageRef': 'C-API-PRIME',
         'H1.packageName': 'Prime Motor',
@@ -188,10 +204,12 @@ export class FakeWorkHub24Client implements WorkHub24Client {
       workflow,
       fields: cardFields,
       tables: {},
-      taskId: workflow === 'WF-01' ? '4.0' : undefined,
-      taskName: workflow === 'WF-01' ? 'Start' : undefined,
+      taskId: workflow === 'WF-01' ? '4.0' : 'wf-02-verification',
+      taskName: workflow === 'WF-01' ? 'Start' : 'Awaiting Verification',
       lastUpdatedDate: new Date().toISOString(),
-      openTask: workflow === 'WF-01' ? { taskId: '4.0', stepId: '4.0' } : undefined
+      openTask: workflow === 'WF-01'
+        ? { taskId: '4.0', stepId: '4.0' }
+        : { taskId: 'wf-02-verification', stepId: 'Awaiting Verification' }
     };
     this.items.set(itemId, item);
     if (requestNo) {
@@ -204,16 +222,14 @@ export class FakeWorkHub24Client implements WorkHub24Client {
     };
   }
 
-  async findItemByField(workflow: 'WF-01', fieldId: string, value: string): Promise<{ itemId: string } | null> {
-    const found = Array.from(this.items.values()).find((item) => item.workflow === workflow && String(item.fields[fieldId] ?? '') === String(value));
-    return found ? { itemId: found.itemId } : null;
+  async getRequestCard(requestNo: string): Promise<WorkHub24Card | null> {
+    const found = Array.from(this.items.values()).find((item) => item.workflow === 'WF-01' && String(item.fields.A1 ?? '') === requestNo);
+    return found ? this.getItem(found.itemId) : null;
   }
 
-  async findItemsByField(workflow: 'WF-01', fieldId: string, value: string): Promise<{ itemId: string; fields: Record<string, unknown> }[]> {
-    const matches = Array.from(this.items.values())
-      .filter((item) => item.workflow === workflow && String(item.fields[fieldId] ?? '') === String(value))
-      .map((item) => ({ itemId: item.itemId, fields: item.fields }));
-    return matches;
+  async findRequestByChassis(chassisNo: string): Promise<WorkHub24Card | null> {
+    const found = Array.from(this.items.values()).find((item) => item.workflow === 'WF-01' && String(item.fields.C7 ?? '') === chassisNo);
+    return found ? this.getItem(found.itemId) : null;
   }
 
   async getItem(itemId: string): Promise<WorkHub24Card> {
@@ -272,9 +288,18 @@ export class FakeWorkHub24Client implements WorkHub24Client {
     }
   }
 
-  async getOpenTaskId(cardId: string | number, taskName: string): Promise<string> {
+  readonly taskLookupWaits: number[] = [];
+
+  async getOpenTaskId(
+    cardId: string | number,
+    taskName: string,
+    workflow: 'WF-01' | 'WF-02' = 'WF-01',
+    options: TaskLookupOptions = {}
+  ): Promise<string> {
+    this.taskLookupWaits.push(options.waitForTaskMs ?? 0);
     const item = this.items.get(String(cardId));
     if (!item) throw new Error(`Card ${cardId} not found`);
+    if (item.workflow !== workflow) throw new Error(`Card ${cardId} does not belong to ${workflow}.`);
     if (item.taskName !== taskName || typeof item.taskId !== 'string' || !item.taskId.trim()) {
       throw new ApiError('ALREADY_SUBMITTED', 'This step has already been submitted.');
     }
@@ -297,7 +322,7 @@ export class FakeWorkHub24Client implements WorkHub24Client {
             ? 'Awaiting Policy Upload'
             : undefined;
     item.openTask = { taskId, stepId: taskName };
-    if (taskName === 'Awaiting Policy Upload') item.fields.A3 = 'Completed';
+    // Status (A3) is set by the backend, never by the workflow.
     item.lastUpdatedDate = new Date().toISOString();
     this.completedTasks.push({ cardId: String(cardId), taskName });
     this.taskEvents.push({ operation: 'POST_TASK', cardId: String(cardId), taskName });
@@ -313,13 +338,37 @@ export class FakeWorkHub24Client implements WorkHub24Client {
       const fields = await prepareFields();
       this.taskEvents.push({ operation: 'PUT', cardId: String(cardId), taskName });
       await this.updateFields(String(cardId), fields);
-      await this.markTaskDone(cardId, taskName);
+      await completeAfterUpdate(cardId, taskName, async () => {
+        if (this.failNextTaskCompletion) {
+          this.failNextTaskCompletion = false;
+          throw new Error('Simulated task completion failure');
+        }
+        await this.markTaskDone(cardId, taskName);
+      });
     });
   }
+
+  /** Tests: make the next WF-01 task completion fail after its card update succeeded. */
+  failNextTaskCompletion = false;
 
   async completeTask(cardId: string | number, taskName: string): Promise<void> {
     await this.withCardLock(cardId, async () => {
       await this.getOpenTaskId(cardId, taskName);
+      await this.markTaskDone(cardId, taskName);
+    });
+  }
+
+  async updateAndCompleteTaskForWorkflow(
+    _workflow: 'WF-01' | 'WF-02',
+    cardId: string | number,
+    taskName: string,
+    fields: Record<string, unknown>,
+    options: TaskLookupOptions = {}
+  ): Promise<void> {
+    await this.withCardLock(cardId, async () => {
+      await this.getOpenTaskId(cardId, taskName, _workflow, options);
+      this.taskEvents.push({ operation: 'PUT', cardId: String(cardId), taskName });
+      await this.updateFields(String(cardId), fields);
       await this.markTaskDone(cardId, taskName);
     });
   }

@@ -6,6 +6,9 @@ import { join } from 'node:path';
 
 import { createApp } from '../src/app.js';
 import { FakeWorkHub24Client } from '../src/wh24/fakeClient.js';
+import { FIELD_MAP, REQUEST_STATUS } from '../src/wh24/fields.js';
+import { CURRENT_PACKAGE_INSURER_CODE } from '../src/routes/insurer.js';
+import { buildRequestCardFields, formatWh24DateTime } from '../src/routes/requests.js';
 import { JsonOffersRepository, MemoryOffersRepository, MemoryOtpAttemptsRepository, type OffersRepository } from '../src/services/offersStore.js';
 
 const uploadDirectories: string[] = [];
@@ -44,7 +47,7 @@ async function loginAsInsurer(app: any, client: FakeWorkHub24Client, email = 'di
 function getLastOtp(client: FakeWorkHub24Client) {
   const items = Array.from((client as any).items.values()).filter((item: any) => item.workflow === 'WF-02');
   const last = items[items.length - 1] as any;
-  return String(last?.fields?.O5 ?? '');
+  return String(last?.fields?.oTPCode ?? '');
 }
 
 describe('Motor Insurance Gateway backend', () => {
@@ -60,19 +63,89 @@ describe('Motor Insurance Gateway backend', () => {
       respondedAt: '2026-11-11T00:00:00.000Z'
     };
 
-    await repository.add(offer);
-    const secondInsurer = await repository.add({ ...offer, insurer: 'Insurer B', packageRef: 'B-COMP-01' });
+    await repository.save({ ...offer, packageRef: 'A-COMP-PLUS' });
+    await repository.save(offer);
+    await repository.save({ ...offer, requestNo: 'MIG-2026-0149' });
 
-    expect(JSON.parse(readFileSync(join(directory, 'offers.json'), 'utf8'))).toEqual([offer]);
+    // One offer per request: a resubmit overwrites, other requests are untouched.
+    expect(JSON.parse(readFileSync(join(directory, 'offers.json'), 'utf8'))).toEqual([
+      offer,
+      { ...offer, requestNo: 'MIG-2026-0149' }
+    ]);
     expect(await repository.get(offer.requestNo)).toEqual([offer]);
-    expect(secondInsurer.added).toBe(false);
+  });
+
+  it('stores the Screen 2 offer only after WH24 succeeds, and allows a retry after a failure', async () => {
+    class FailingOnceClient extends FakeWorkHub24Client {
+      failNext = true;
+      override async updateAndCompleteTask(
+        cardId: string | number,
+        taskName: string,
+        prepareFields: () => Promise<Record<string, unknown>> | Record<string, unknown>
+      ) {
+        if (this.failNext) {
+          this.failNext = false;
+          await prepareFields();
+          throw new Error('WH24 PUT failed');
+        }
+        return super.updateAndCompleteTask(cardId, taskName, prepareFields);
+      }
+    }
+    const client = new FailingOnceClient();
+    const offers = new MemoryOffersRepository();
+    const app = createTestApp(client, offers);
+    const insurerToken = await loginAsInsurer(app, client);
+    const submit = (packageRef: string) => request(app)
+      .post('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${insurerToken}`)
+      .send({ mode: 'stored', packageRef });
+
+    const failed = await submit('A-COMP-STD');
+    expect(failed.status).toBe(500);
+    expect(await offers.get('MIG-2026-0148')).toEqual([]);
+
+    const retried = await submit('A-COMP-PLUS');
+    expect(retried.status).toBe(204);
+    expect((await offers.get('MIG-2026-0148')).map((offer) => offer.packageRef)).toEqual(['A-COMP-PLUS']);
+  });
+
+  it('overwrites a half-finished offer while the Screen 2 task is still open', async () => {
+    const client = new FakeWorkHub24Client();
+    const offers = new MemoryOffersRepository();
+    await offers.save({
+      requestNo: 'MIG-2026-0148', insurer: 'Insurer A', packageRef: 'A-COMP-PLUS',
+      respondedBy: 'dilani.w@insurer-a.lk', respondedAt: '2026-11-10T00:00:00.000Z'
+    });
+    const app = createTestApp(client, offers);
+    const insurerToken = await loginAsInsurer(app, client);
+
+    const view = await request(app)
+      .get('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${insurerToken}`);
+    expect(view.status).toBe(200);
+    expect(view.body.submission).toBeUndefined();
+
+    const resubmitted = await request(app)
+      .post('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${insurerToken}`)
+      .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
+    expect(resubmitted.status).toBe(204);
+    expect((await offers.get('MIG-2026-0148')).map((offer) => offer.packageRef)).toEqual(['A-COMP-STD']);
+  });
+
+  it('looks up WF-01 tasks once with no wait; only WF-02 result updates wait', async () => {
+    const client = new FakeWorkHub24Client();
+    const app = createTestApp(client);
+    await loginAsInsurer(app, client);
+    await vi.waitFor(() => expect(client.completedTasks.some((task) => task.taskName === 'Awaiting Verification')).toBe(true));
+    // WF-01 sign-in gate: one lookup, no wait. WF-02 Verified update: capped 8s wait.
+    expect(client.taskLookupWaits).toEqual([0, 0, 8000]);
   });
 
   it('allows Screen 1 when WorkHub24 chassis lookup fails', async () => {
     class FailingChassisLookupClient extends FakeWorkHub24Client {
-      override async findItemByField(workflow: 'WF-01', fieldId: string, value: string) {
-        if (fieldId === 'C7') throw new Error('cards/list returned HTML');
-        return super.findItemByField(workflow, fieldId, value);
+      override async findRequestByChassis(): Promise<never> {
+        throw new Error('chassis search returned HTML');
       }
     }
 
@@ -130,9 +203,28 @@ describe('Motor Insurance Gateway backend', () => {
     } finally {
       warning.mockRestore();
     }
+
+    // A client with no chassis search (the live tenant) skips the check and logs it once.
+    class NoChassisSearchClient extends FakeWorkHub24Client {}
+    Object.defineProperty(NoChassisSearchClient.prototype, 'findRequestByChassis', { value: undefined });
+    const plainClient = new NoChassisSearchClient();
+    const plainApp = createTestApp(plainClient);
+    const plainToken = await loginAsFinance(plainApp, plainClient);
+    const skipWarning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      for (const chassisNo of ['CH-SKIP-1', 'CH-SKIP-2']) {
+        const created = await request(plainApp).post('/api/requests').set('Authorization', `Bearer ${plainToken}`)
+          .send({ ...payload, vehicle: { ...payload.vehicle, chassisNo } });
+        expect(created.status).toBe(201);
+      }
+      const skipped = skipWarning.mock.calls.filter(([message]) => String(message).startsWith('Duplicate-chassis check skipped'));
+      expect(skipped).toHaveLength(1);
+    } finally {
+      skipWarning.mockRestore();
+    }
   });
 
-  it('uses the finance user branch name in the session', async () => {
+  it('uses finance user view keys for OTP and session data', async () => {
     const client = new FakeWorkHub24Client();
     const app = createTestApp(client);
     const email = 'nadeesha.fernando@northgate.lk';
@@ -140,14 +232,63 @@ describe('Motor Insurance Gateway backend', () => {
     await request(app).post('/api/auth/otp/request').send({ email, purpose: 'finance_signin' });
     const otp = getLastOtp(client);
     const otpCard = Array.from((client as any).items.values()).find((item: any) => item.workflow === 'WF-02') as any;
-    expect(otpCard.fields.title).toBe('OTP · finance_signin · ●●● ●●● 0001');
+    expect(otpCard.fields.title).toBe('OTP · Finance User Sign-in · ●●● ●●● 0001');
+    expect(otpCard.fields).toMatchObject({
+      receipentEmail: email,
+      mobile: '●●● ●●● 0001',
+      oTPMobile: '94770000001',
+      sentAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/),
+      purpose: 'Finance User Sign-in',
+      requestRef: ''
+    });
+    expect(Object.keys(otpCard.fields).sort()).toEqual([
+      'mobile', 'oTPCode', 'oTPMobile', 'purpose', 'receipentEmail', 'requestRef', 'sentAt', 'title'
+    ]);
     expect(otpCard.fields.title).not.toContain(otp);
     const verified = await request(app)
       .post('/api/auth/otp/verify')
       .send({ email, code: otp, purpose: 'finance_signin' });
 
     expect(verified.status).toBe(200);
-    expect(verified.body.user.branch).toBe('Kandy City');
+    // WF-01 financePartner is a dropdown of partner names, so the session carries the name.
+    expect(verified.body.user.partner).toBe('Northgate Finance PLC');
+    await vi.waitFor(() => {
+      expect(otpCard.fields.oTPResult).toBe('Verified');
+      expect(client.completedTasks).toContainEqual({ cardId: otpCard.itemId, taskName: 'Awaiting Verification' });
+    });
+  });
+
+  it('matches active finance users case-insensitively and uses the first duplicate', async () => {
+    class DuplicateFinanceUsersClient extends FakeWorkHub24Client {
+      override async queryDatastore(table: string, filter: Record<string, string | number | boolean>) {
+        if (table === 'ds_finance_user') {
+          return [
+            { active: 'No', email: 'Renu@Process361.com', mobile: '+94770000000', name: 'Inactive', partnerCode: 'FP-X' },
+            { active: 'Yes', email: 'Renu@Process361.com', mobile: '+94770000001', name: 'First User', partnerCode: 'FP-01' },
+            { active: 'Yes', email: 'renu@process361.com', mobile: '+94770000002', name: 'Second User', partnerCode: 'FP-02' }
+          ];
+        }
+        return super.queryDatastore(table, filter);
+      }
+    }
+
+    const client = new DuplicateFinanceUsersClient();
+    const app = createTestApp(client);
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await request(app)
+        .post('/api/auth/otp/request')
+        .send({ email: 'RENU@PROCESS361.COM', purpose: 'finance_signin' });
+      const otpCard = Array.from((client as any).items.values()).find((item: any) => item.workflow === 'WF-02') as any;
+      expect(otpCard.fields).toMatchObject({
+        receipentEmail: 'Renu@Process361.com',
+        oTPMobile: '94770000001',
+        mobile: '●●● ●●● 0001'
+      });
+      expect(warning).toHaveBeenCalledOnce();
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it('verifies OTP codes and locks after repeated failures', async () => {
@@ -173,9 +314,62 @@ describe('Motor Insurance Gateway backend', () => {
     const thirdWrong = await request(app).post('/api/auth/otp/verify').send({ email: 'nadeesha.fernando@northgate.lk', code: '222222', purpose: 'finance_signin', requestNo: 'MIG-2026-0148' });
     expect(thirdWrong.status).toBe(429);
     expect(thirdWrong.body.error.code).toBe('OTP_LOCKED');
+    const otpCard = Array.from((client as any).items.values()).find((item: any) => item.workflow === 'WF-02') as any;
+    await vi.waitFor(() => {
+      expect(otpCard.fields.oTPResult).toBe('Failed');
+      expect(client.completedTasks).toContainEqual({ cardId: otpCard.itemId, taskName: 'Awaiting Verification' });
+    });
 
     const valid = await request(app).post('/api/auth/otp/verify').send({ email: 'nadeesha.fernando@northgate.lk', code: otp, purpose: 'finance_signin', requestNo: 'MIG-2026-0148' });
     expect(valid.status).toBe(429);
+  });
+
+  it('expires the prior WF-02 task before creating a replacement code', async () => {
+    const client = new FakeWorkHub24Client();
+    const app = createTestApp(client);
+    const email = 'nadeesha.fernando@northgate.lk';
+
+    await request(app).post('/api/auth/otp/request').send({ email, purpose: 'finance_signin' });
+    const firstCard = Array.from((client as any).items.values()).find((item: any) => item.workflow === 'WF-02') as any;
+
+    const replacement = await request(app).post('/api/auth/otp/request').send({ email, purpose: 'finance_signin' });
+    expect(replacement.status).toBe(200);
+    expect(firstCard.fields.oTPResult).toBe('Expired');
+    expect(client.completedTasks).toContainEqual({ cardId: firstCard.itemId, taskName: 'Awaiting Verification' });
+    expect(Array.from((client as any).items.values()).filter((item: any) => item.workflow === 'WF-02')).toHaveLength(2);
+  });
+
+  it('continues successful sign-in when the WF-02 result update fails', async () => {
+    class FailingOtpTaskClient extends FakeWorkHub24Client {
+      override async updateAndCompleteTaskForWorkflow(
+        _workflow: 'WF-01' | 'WF-02',
+        _cardId: string | number,
+        _taskName: string,
+        _fields: Record<string, unknown>
+      ): Promise<void> {
+        throw new Error('test task update failure');
+      }
+    }
+
+    const client = new FailingOtpTaskClient();
+    const app = createTestApp(client);
+    const email = 'nadeesha.fernando@northgate.lk';
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await request(app).post('/api/auth/otp/request').send({ email, purpose: 'finance_signin' });
+      const code = getLastOtp(client);
+      const verified = await request(app)
+        .post('/api/auth/otp/verify')
+        .send({ email, code, purpose: 'finance_signin' });
+
+      expect(verified.status).toBe(200);
+      await vi.waitFor(() => expect(warning).toHaveBeenCalledWith(
+        'WorkHub24 WF-02 OTP result update failed; continuing sign-in.',
+        expect.objectContaining({ result: 'Verified' })
+      ));
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it('does not send a linked sign-in code when the screen task is not open', async () => {
@@ -194,6 +388,91 @@ describe('Motor Insurance Gateway backend', () => {
     expect(response.status).toBe(409);
     expect(response.body.error.code).toBe('ALREADY_SUBMITTED');
     expect(Array.from((client as any).items.values()).filter((item: any) => item.workflow === 'WF-02')).toHaveLength(0);
+  });
+
+  it('links an insurer to a request by currentInsurer, else currentInsurerEmail via the insurers view', async () => {
+    const client = new FakeWorkHub24Client();
+    const app = createTestApp(client);
+    client.setOpenTask('wf-01-0148', 'Awaiting Insurer Responses');
+    const send = () => request(app).post('/api/auth/otp/request').send({
+      email: 'dilani.w@insurer-a.lk', purpose: 'insurer_signin', requestNo: 'MIG-2026-0148', screen: 'response'
+    });
+
+    // currentInsurer filled: it decides, even when the email would match.
+    await client.updateFields('wf-01-0148', { G4: 'Insurer B', G5: 'quotes@insurer-a.lk' });
+    expect((await send()).body.error?.code).toBe('NOT_AUTHORISED');
+    await client.updateFields('wf-01-0148', { G4: 'Insurer A' });
+    expect((await send()).status).toBe(200);
+
+    // currentInsurer empty: currentInsurerEmail is matched to contactEmail in the insurers view.
+    await client.updateFields('wf-01-0148', { G4: '', G5: 'QUOTES@insurer-a.lk' });
+    expect((await send()).status).toBe(200);
+    await client.updateFields('wf-01-0148', { G5: 'quotes@insurer-b.lk' });
+    expect((await send()).body.error?.code).toBe('NOT_AUTHORISED');
+    await client.updateFields('wf-01-0148', { G5: '' });
+    expect((await send()).body.error?.code).toBe('NOT_AUTHORISED');
+
+    // selectedInsurers rows are never read.
+    await client.updateFields('wf-01-0148', { F1: [{ insurer: 'Insurer A' }], I2: 'Insurer A' });
+    expect((await send()).body.error?.code).toBe('NOT_AUTHORISED');
+  });
+
+  it('gates insurer sign-in by the screen task: Screen 4 needs Awaiting Policy Upload', async () => {
+    const client = new FakeWorkHub24Client();
+    const app = createTestApp(client);
+    const wf02Count = () => Array.from((client as any).items.values()).filter((item: any) => item.workflow === 'WF-02').length;
+    // Safety net: with the current-insurer fields empty, the selected insurer (I2) can still sign in on Screen 4.
+    await client.updateFields('wf-01-0148', { G4: '', G5: '', I2: 'Insurer A' });
+    client.setOpenTask('wf-01-0148', 'Awaiting Policy Upload');
+    const send = (screen?: string) => request(app).post('/api/auth/otp/request').send({
+      email: 'dilani.w@insurer-a.lk', purpose: 'insurer_signin', requestNo: 'MIG-2026-0148', ...(screen ? { screen } : {})
+    });
+
+    // Screen 2: with the current-insurer fields empty (and I2 only counting on Screen 4), not linked.
+    const closedScreen2 = await send('response');
+    expect(closedScreen2.status).toBe(403);
+    expect(closedScreen2.body.error.code).toBe('NOT_AUTHORISED');
+    expect(wf02Count()).toBe(0);
+
+    const binding = await send('binding');
+    expect(binding.status).toBe(200);
+    expect(wf02Count()).toBe(1);
+
+    const payment = await send('payment');
+    expect(payment.status).toBe(410);
+    expect(wf02Count()).toBe(1);
+
+    await client.updateFields('wf-01-0148', { A3: REQUEST_STATUS.completed });
+    client.setOpenTask('wf-01-0148', 'None');
+    const completed = await send('binding');
+    expect(completed.status).toBe(410);
+    expect(completed.body.error.code).toBe('REQUEST_CLOSED');
+    expect(wf02Count()).toBe(1);
+  });
+
+  it('gates the Screen 2 submit by the open task, not by Status', async () => {
+    const client = new FakeWorkHub24Client();
+    const app = createTestApp(client);
+    const insurerToken = await loginAsInsurer(app, client);
+    await client.updateFields('wf-01-0148', { A3: 'Some Other Status' });
+
+    const submitted = await request(app)
+      .post('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${insurerToken}`)
+      .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
+    expect(submitted.status).toBe(204);
+    expect((await client.getItem('wf-01-0148')).fields.G19).toBe('No');
+
+    const client2 = new FakeWorkHub24Client();
+    const app2 = createTestApp(client2);
+    const token2 = await loginAsInsurer(app2, client2);
+    client2.setOpenTask('wf-01-0148', 'Awaiting Package Selection');
+    const closed = await request(app2)
+      .post('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${token2}`)
+      .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
+    expect(closed.status).toBe(409);
+    expect(closed.body.error.code).toBe('ALREADY_SUBMITTED');
   });
 
   it('creates a request and blocks duplicate chassis numbers', async () => {
@@ -241,11 +520,11 @@ describe('Motor Insurance Gateway backend', () => {
     const create = await request(app).post('/api/requests').set('Authorization', `Bearer ${token}`).send(payload);
     expect(create.status).toBe(201);
     expect(create.body.requestNo).toMatch(/^MIG-\d{4}-\d{4}$/);
-    const createdItem = await client.findItemByField('WF-01', 'A1', create.body.requestNo);
-    expect(createdItem).not.toBeNull();
-    const createdRecord = await client.getItem(createdItem!.itemId);
-    expect(createdRecord.fields.A5).toBe('Kandy City');
+    const createdRecord = (await client.getRequestCard(create.body.requestNo))!;
+    expect(createdRecord).not.toBeNull();
     expect(createdRecord.fields.title).toBe('Saman Silva · CH-NEW-001');
+    expect(createdRecord.fields.A3).toBe(REQUEST_STATUS.awaitingQuotes);
+    expect(createdRecord.fields.B4).toBe('94770000007');
 
     const duplicate = await request(app).post('/api/requests').set('Authorization', `Bearer ${token}`).send({ ...payload, vehicle: { ...payload.vehicle, chassisNo: 'CH-NEW-001' } });
     expect(duplicate.status).toBe(409);
@@ -264,7 +543,7 @@ describe('Motor Insurance Gateway backend', () => {
       .send({ mode: 'stored', packageRef: 'A-COMP-STD', remarks: 'Looks good' });
     expect(insurerResponse.status).toBe(204);
     expect(client.completedTasks.at(-1)?.taskName).toBe('Awaiting Insurer Responses');
-    expect((await client.getItem('wf-01-0148')).fields.A3).toBe('Awaiting Quotes');
+    expect((await client.getItem('wf-01-0148')).fields.A3).toBe(REQUEST_STATUS.awaitingSelection);
     expect(client.taskEvents.slice(-3).map((event) => event.operation)).toEqual(['GET_TASK', 'PUT', 'POST_TASK']);
 
     const offers = await request(app).get('/api/finance/requests/MIG-2026-0148/offers').set('Authorization', `Bearer ${financeToken}`);
@@ -280,12 +559,20 @@ describe('Motor Insurance Gateway backend', () => {
     const selected = await request(app).post('/api/finance/requests/MIG-2026-0148/select').set('Authorization', `Bearer ${financeToken}`).send({ insurer: 'Insurer A', packageRef: 'A-COMP-STD' });
     expect(selected.status).toBe(200);
     expect(client.completedTasks.at(-1)?.taskName).toBe('Awaiting Package Selection');
+    const selectedCard = await client.getItem('wf-01-0148');
+    // Email and connection type come from the insurers view, not from F1.
+    expect(selectedCard.fields.I4).toBe('quotes@insurer-a.lk');
+    expect(selectedCard.fields.I3).toBe('Webform');
+    expect(selectedCard.fields.I5a).toBe(287980);
+    expect(selectedCard.fields.A3).toBe(REQUEST_STATUS.awaitingConsent);
     const otp = String((client as any).items.values().next().value?.fields?.I6 ?? '');
 
     const verifyOtp = await request(app).post('/api/finance/requests/MIG-2026-0148/customer-otp').set('Authorization', `Bearer ${financeToken}`).send({ code: otp || '654321' });
     expect(verifyOtp.status).toBe(200);
     expect(verifyOtp.body.result).toBe('verified');
     expect(client.completedTasks.at(-1)?.taskName).toBe('Awaiting OTP Verification');
+    expect((await client.getItem('wf-01-0148')).fields.I12).toBe(287980);
+    expect((await client.getItem('wf-01-0148')).fields.A3).toBe(REQUEST_STATUS.awaitingPolicy);
     const closedCompare = await request(app)
       .get('/api/finance/requests/MIG-2026-0148/offers')
       .set('Authorization', `Bearer ${financeToken}`);
@@ -293,7 +580,7 @@ describe('Motor Insurance Gateway backend', () => {
     expect(closedCompare.body.error.code).toBe('ALREADY_SUBMITTED');
   });
 
-  it('stores one offer per insurer without changing flow-owned status', async () => {
+  it('stores one offer per insurer and moves status to Awaiting Selection', async () => {
     const client = new FakeWorkHub24Client();
     const offers = new MemoryOffersRepository();
     const app = createTestApp(client, offers);
@@ -307,7 +594,7 @@ describe('Motor Insurance Gateway backend', () => {
       .set('Authorization', `Bearer ${insurerToken}`)
       .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
     expect(submitted.status).toBe(204);
-    expect((await client.getItem('wf-01-0148')).fields.A3).toBe('Awaiting Quotes');
+    expect((await client.getItem('wf-01-0148')).fields.A3).toBe(REQUEST_STATUS.awaitingSelection);
     expect(client.completedTasks.at(-1)?.taskName).toBe('Awaiting Insurer Responses');
 
     const responseView = await request(app)
@@ -360,7 +647,7 @@ describe('Motor Insurance Gateway backend', () => {
     expect(submitted.status).toBe(204);
     const card = await client.getItem('wf-01-0148');
     expect(card.fields.G7).toBe('Insurer A');
-    expect(card.fields.G8).toBe('INSURERA-NEW-MIG-2026-0148');
+    expect(card.fields.G8).toBe('INSA-NEW-MIG-2026-0148');
     expect(card.fields.G9).toBe('Custom Comprehensive');
     expect(card.fields.G10).toBe('Motor car');
     expect(card.fields.G11).toBe('Comprehensive');
@@ -373,8 +660,71 @@ describe('Motor Insurance Gateway backend', () => {
     expect(card.fields.G18).toBe('2026-12-31');
     expect(card.fields.G19).toBe('Yes');
     expect(card.fields.G21).toEqual(['SRCC']);
-    expect(card.fields.A3).toBe('Awaiting Quotes');
-    expect((await offers.get('MIG-2026-0148'))[0]?.packageRef).toBe('INSURERA-NEW-MIG-2026-0148');
+    // Key not confirmed yet, so the insurer code is not sent.
+    expect(card.fields[CURRENT_PACKAGE_INSURER_CODE]).toBeUndefined();
+    expect(card.fields.A3).toBe(REQUEST_STATUS.awaitingSelection);
+    expect((await offers.get('MIG-2026-0148'))[0]?.packageRef).toBe('INSA-NEW-MIG-2026-0148');
+  });
+
+  it('builds the WF-01 create body with a WH24 datetime, text covers and the partner name', () => {
+    const fields = buildRequestCardFields({
+      customer: { type: 'Individual', name: 'C', idNumber: '200012345678', mobile: '+94771234567', address: 'X' },
+      vehicle: { category: 'Motor car', make: 'M', model: 'N', year: 2024, condition: 'Registered', chassisNo: 'CH', engineNo: 'EN', value: 1, usage: 'Private' },
+      finance: { facilityType: 'Lease', referenceNo: 'R', amount: 1, tenureMonths: 12 },
+      cover: { coverType: 'Comprehensive', sumInsured: 1, optionalCovers: ['SRCC', 'Flood'], policyStartDate: '2026-12-01' },
+      consent: true
+    }, { partner: 'Northgate Finance PLC', name: 'F', email: 'f@example.com' });
+
+    expect(fields.A2).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}$/);
+    expect(formatWh24DateTime(new Date('2026-11-11T11:33:33Z'))).toBe('2026-11-11T11:33:33.000000');
+    expect(formatWh24DateTime(new Date('2026-11-11T11:33:33Z'), 'isoZ')).toBe('2026-11-11T11:33:33.000Z');
+    expect(fields.E3).toBe('SRCC, Flood');
+    expect(fields.A4).toBe('Northgate Finance PLC');
+  });
+
+  it('writes the signed-in insurer code with a new package once its key is mapped', async () => {
+    FIELD_MAP[CURRENT_PACKAGE_INSURER_CODE] = 'currentPackageInsurerCode';
+    try {
+      const client = new FakeWorkHub24Client();
+      const app = createTestApp(client);
+      const insurerToken = await loginAsInsurer(app, client);
+      const submitted = await request(app)
+        .post('/api/insurer/requests/MIG-2026-0148/response')
+        .set('Authorization', `Bearer ${insurerToken}`)
+        .send({
+          mode: 'new',
+          package: {
+            name: 'Custom Comprehensive', coverType: 'Comprehensive', vehicleCategory: 'Motor car',
+            sumMin: 8000000, sumMax: 9000000, premiumRate: 2.8, taxes: 24990, excess: 30000,
+            standardCovers: 'Own damage, theft', optionalCovers: [], validUntil: '2026-12-31'
+          }
+        });
+
+      expect(submitted.status).toBe(204);
+      const card = await client.getItem('wf-01-0148');
+      expect(card.fields[CURRENT_PACKAGE_INSURER_CODE]).toBe('INSA');
+      expect(card.fields.G19).toBe('Yes');
+    } finally {
+      delete FIELD_MAP[CURRENT_PACKAGE_INSURER_CODE];
+    }
+  });
+
+  it('does not write the insurer code for a stored package', async () => {
+    FIELD_MAP[CURRENT_PACKAGE_INSURER_CODE] = 'currentPackageInsurerCode';
+    try {
+      const client = new FakeWorkHub24Client();
+      const app = createTestApp(client);
+      const insurerToken = await loginAsInsurer(app, client);
+      const submitted = await request(app)
+        .post('/api/insurer/requests/MIG-2026-0148/response')
+        .set('Authorization', `Bearer ${insurerToken}`)
+        .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
+
+      expect(submitted.status).toBe(204);
+      expect((await client.getItem('wf-01-0148')).fields[CURRENT_PACKAGE_INSURER_CODE]).toBeUndefined();
+    } finally {
+      delete FIELD_MAP[CURRENT_PACKAGE_INSURER_CODE];
+    }
   });
 
   it('retries the package view once for a newly submitted package reference', async () => {
@@ -389,15 +739,19 @@ describe('Motor Insurance Gateway backend', () => {
         return [
           ...rows,
           {
-            package_ref: 'INSURERA-NEW-MIG-2026-0148',
-            insurer: 'Insurer A',
+            iD: 99,
+            packageRef: 'INSA-NEW-MIG-2026-0148',
+            insurerCode: 'INSA',
+            insurerName: 'Insurer A',
             name: 'Delayed Package',
-            premium_rate: 2.8,
-            tax_rate: 10.5,
-            excess: 30000,
-            standard_covers: 'Own damage, theft',
-            optional_covers: 'SRCC',
-            valid_to: '2026-12-31'
+            premiumRate: '2.8',
+            taxRate: '10.5',
+            excess: '30000',
+            standardCovers: 'Own damage, theft',
+            optionalCovers: 'SRCC',
+            validTo: '2026-12-31',
+            status: 'Active',
+            sourceRequestNo: 'MIG-2026-0148'
           }
         ];
       }
@@ -435,13 +789,40 @@ describe('Motor Insurance Gateway backend', () => {
 
     expect(compare.status).toBe(200);
     expect(client.packageViewCalls).toBe(2);
-    expect(compare.body.offers.find((offer: any) => offer.packageRef === 'INSURERA-NEW-MIG-2026-0148')).toMatchObject({
+    expect(compare.body.offers.find((offer: any) => offer.packageRef === 'INSA-NEW-MIG-2026-0148')).toMatchObject({
       premium: 238000,
       taxes: 24990,
       total: 262990
     });
     expect(insurerToken).toBeTruthy();
     expect(financeToken).toBeTruthy();
+  });
+
+  it('keeps the status update but returns an error when completing the task fails, without retrying', async () => {
+    const client = new FakeWorkHub24Client();
+    const app = createTestApp(client);
+    const financeToken = await loginAsFinance(app, client);
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const puts = () => client.taskEvents.filter((event) => event.operation === 'PUT' && event.taskName === 'Awaiting Package Selection').length;
+      client.failNextTaskCompletion = true;
+      const selected = await request(app)
+        .post('/api/finance/requests/MIG-2026-0148/select')
+        .set('Authorization', `Bearer ${financeToken}`)
+        .send({ insurer: 'Insurer C', packageRef: 'C-API-PRIME' });
+
+      expect(selected.status).toBe(500);
+      expect(selected.body.error.message).toMatch(/could not complete this step/i);
+      expect(puts()).toBe(1);
+      expect(client.completedTasks.some((task) => task.taskName === 'Awaiting Package Selection')).toBe(false);
+      expect((await client.getItem('wf-01-0148')).fields.A3).toBe(REQUEST_STATUS.awaitingConsent);
+      expect(errors).toHaveBeenCalledWith(
+        expect.stringMatching(/updated but completing the task failed/),
+        expect.objectContaining({ taskName: 'Awaiting Package Selection' })
+      );
+    } finally {
+      errors.mockRestore();
+    }
   });
 
   it('resends customer OTP after three wrong entries and resets attempts', async () => {
@@ -454,6 +835,7 @@ describe('Motor Insurance Gateway backend', () => {
       .set('Authorization', `Bearer ${financeToken}`)
       .send({ insurer: 'Insurer C', packageRef: 'C-API-PRIME' });
     expect(selected.status).toBe(200);
+    expect((await client.getItem('wf-01-0148')).fields.A3).toBe(REQUEST_STATUS.awaitingConsent);
     const originalOtp = String((await client.getItem('wf-01-0148')).fields.I6);
 
     const first = await request(app)
@@ -475,6 +857,8 @@ describe('Motor Insurance Gateway backend', () => {
     const updatedCard = await client.getItem('wf-01-0148');
     expect(updatedCard.fields.I6).not.toBe(originalOtp);
     expect(updatedCard.fields.I7).toBe('Failed');
+    // Wrong codes never move status.
+    expect(updatedCard.fields.A3).toBe(REQUEST_STATUS.awaitingConsent);
     expect(client.completedTasks.at(-1)?.taskName).toBe('Awaiting OTP Verification');
 
     const compare = await request(app)
@@ -489,7 +873,7 @@ describe('Motor Insurance Gateway backend', () => {
     const client = new FakeWorkHub24Client();
     const app = createTestApp(client);
     const insurerToken = await loginAsInsurer(app, client);
-    await client.updateFields('wf-01-0148', { A3: 'Awaiting Quotes', I2: 'Insurer A' });
+    await client.updateFields('wf-01-0148', { A3: REQUEST_STATUS.awaitingPolicy, I2: 'Insurer A' });
     client.setOpenTask('wf-01-0148', 'Awaiting Policy Upload');
 
     const getBinding = await request(app).get('/api/insurer/requests/MIG-2026-0148/binding').set('Authorization', `Bearer ${insurerToken}`);
@@ -508,6 +892,7 @@ describe('Motor Insurance Gateway backend', () => {
 
     expect(binding.status).toBe(204);
     const savedCard = await client.getItem('wf-01-0148');
+    expect(savedCard.fields.A3).toBe(REQUEST_STATUS.completed);
     expect(savedCard.fields.J7).toContain('/uploads/');
     const quotationUrl = String(savedCard.fields.J7).match(/http:\/\/localhost:4000\/uploads\/\S+/)?.[0];
     expect(quotationUrl).toBeTruthy();

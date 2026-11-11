@@ -17,7 +17,7 @@ export function ComparePage() {
   const requestNo = params.get('req') || '';
   const { session, setSession, expired } = useSession(sessionKey('compare', requestNo));
   if (!requestNo) return <LinkError code="LINK_INVALID" />;
-  if (!session) return <OtpGate purpose="finance_signin" requestNo={requestNo} onVerified={setSession} sessionEnded={expired} context={`Request ${requestNo}`} />;
+  if (!session) return <OtpGate purpose="finance_signin" requestNo={requestNo} screen="compare"onVerified={setSession} sessionEnded={expired} context={`Request ${requestNo}`} />;
   return <Compare requestNo={requestNo} session={session} onSessionEnd={() => setSession(null)} />;
 }
 
@@ -27,7 +27,7 @@ function Compare({ requestNo, session, onSessionEnd }: { requestNo: string; sess
   const api = useApi();
   const { data, error, loading, reload } = useLoad(() => api.getCompare(session.token, requestNo), [requestNo, session.token]);
   const [customerVerified, setCustomerVerified] = useState(false);
-  const partner = [session.user.partner, session.user.branch].filter(Boolean).join(' · ');
+  const partner = session.user.partner ?? '';
   const sess = { email: session.user.email, expiresAt: session.expiresAt, scope: `This link is for ${requestNo} only` };
 
   useEffect(() => {

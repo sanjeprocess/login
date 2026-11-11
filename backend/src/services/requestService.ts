@@ -1,11 +1,8 @@
 import type { WorkHub24Client } from '../wh24/client.js';
 
+/** The WF-01 card for a request; on the live tenant requestNo is the card id (GET /cards/{id}). */
 export async function getItemByRequestNo(client: WorkHub24Client, requestNo: string) {
-  const matches = await client.findItemsByField('WF-01', 'A1', requestNo);
-  if (!matches.length) {
-    return null;
-  }
-  return client.getItem(matches[0].itemId);
+  return client.getRequestCard(requestNo);
 }
 
 export function getRequestSummary(item: Record<string, unknown>) {

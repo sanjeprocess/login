@@ -1,7 +1,7 @@
 import { config } from '../config.js';
-import { FIELD_MAP, fieldId, fieldKey } from './fields.js';
+import { fieldId, fieldKey, wf02FieldKey } from './fields.js';
 import { ApiError } from '../errors.js';
-import type { WorkHub24Card, WorkHub24Client } from './client.js';
+import { completeAfterUpdate, MAX_TASK_WAIT_MS, type TaskLookupOptions, type WorkHub24Card, type WorkHub24Client } from './client.js';
 
 interface CachedToken {
   accessToken: string;
@@ -45,10 +45,40 @@ function normalizeCard(raw: Record<string, unknown>, fallbackId?: number): WorkH
     taskID: typeof raw.taskID === 'string' && raw.taskID ? raw.taskID : null,
     lastUpdatedDate: typeof raw.lastUpdatedDate === 'string' ? raw.lastUpdatedDate : null,
     fields,
-    tables: {
-      F1: Array.isArray(raw.selectedInsurers) ? raw.selectedInsurers as Record<string, unknown>[] : []
-    }
+    // Table rows (e.g. selectedInsurers) are not returned by the API, so none are read.
+    tables: {}
   };
+}
+
+/**
+ * The task-history view returns finished tasks too. Row keys (probed): iD (string),
+ * completedDate (null while open), status ("NEW" seen on an open task). A row is open when
+ * completedDate is empty and status, if present, is not a finished state.
+ */
+const FINISHED_TASK_STATUS = /^(COMPLETED?|DONE|CLOSED|CANCELL?ED|SKIPPED|EXPIRED|REJECTED|FINISHED)$/i;
+
+export function openTaskRows(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  return rows.filter((row) => {
+    const completed = row.completedDate;
+    if (completed !== null && completed !== undefined && String(completed).trim() !== '') return false;
+    const status = row.status;
+    return status === null || status === undefined || !FINISHED_TASK_STATUS.test(String(status).trim());
+  });
+}
+
+/** Newest open task: the highest iD when all iDs are numeric, otherwise the view's first row (newest first). */
+export function newestTaskRow(rows: Record<string, unknown>[]): Record<string, unknown> {
+  const numeric = rows.every((row) => /^\d+$/.test(String(row.iD ?? '')));
+  if (!numeric) return rows[0];
+  return rows.reduce((best, row) => (BigInt(String(row.iD)) > BigInt(String(best.iD)) ? row : best));
+}
+
+/** The JSON body POSTed to create a card: design ids mapped to API keys, title passed through. */
+export function createCardBody(fields: Record<string, unknown>): Record<string, unknown> {
+  const mappedFields = Object.fromEntries(
+    Object.entries(fields).filter(([key]) => key !== 'title').map(([key, value]) => [fieldKey(key), value])
+  );
+  return { ...mappedFields, ...(typeof fields.title === 'string' ? { title: fields.title } : {}) };
 }
 
 export class HttpWorkHub24Client implements WorkHub24Client {
@@ -78,7 +108,7 @@ export class HttpWorkHub24Client implements WorkHub24Client {
     const contentType = response.headers.get('content-type') ?? '';
     const body = await response.text();
     if (!response.ok) {
-      throw new Error(`WH24 ${description} failed: ${response.status} ${response.statusText}: ${body}`);
+      throw new Error(`WH24 ${description} failed: ${response.status} ${response.statusText}.`);
     }
     if (!contentType.toLowerCase().includes('json')) {
       throw new Error(`WH24 ${description} returned non-JSON content (${contentType || 'unknown content type'}).`);
@@ -190,57 +220,35 @@ export class HttpWorkHub24Client implements WorkHub24Client {
   }
 
   async createItem(workflow: Workflow, fields: Record<string, unknown>): Promise<{ itemId: string; requestNo?: string; title?: string | null }> {
-    const mappedFields = Object.fromEntries(
-      Object.entries(fields).filter(([key]) => key !== 'title').map(([key, value]) => [fieldKey(key), value])
-    );
     const payload = await this.apiRequest(`${this.workflowPath(workflow)}/cards`, {
       method: 'POST',
-      body: JSON.stringify({ ...mappedFields, ...(typeof fields.title === 'string' ? { title: fields.title } : {}) })
+      body: JSON.stringify(createCardBody(fields))
     });
     if (!isRecord(payload)) throw new Error('WorkHub24 create-card response was not a JSON object.');
     const card = normalizeCard(payload);
     return {
       itemId: card.itemId,
-      requestNo: card.fields.A1 === undefined ? undefined : String(card.fields.A1),
+      // The request number is the card id: it is what GET /cards/{requestNo} finds again.
+      requestNo: workflow === 'WF-01' ? card.itemId : undefined,
       title: typeof payload.title === 'string' ? payload.title : null
     };
   }
 
-  async listCards(filterTokens: Record<string, unknown>[]): Promise<WorkHub24Card[]> {
-    const payload = await this.apiRequest(`${this.workflowPath('WF-01')}/cards/list`, {
-      method: 'POST',
-      body: JSON.stringify({
-        fields: [...new Set(Object.values(FIELD_MAP))],
-        filters: JSON.stringify(filterTokens),
-        limit: 50,
-        offset: 0,
-        orderBy: 'lastUpdatedDate DESC',
-        showArchived: false
-      })
-    });
-    if (!Array.isArray(payload) || !payload.every(isRecord)) {
-      throw new Error('WorkHub24 cards/list response did not contain a JSON array of cards.');
+  /**
+   * requestNo is the WF-01 card id: GET /cards/{requestNo}. WH24 answers an unknown card with
+   * HTML (or 404), which is reported as "no such request"; other failures are rethrown.
+   */
+  async getRequestCard(requestNo: string): Promise<WorkHub24Card | null> {
+    if (!/^\d+$/.test(requestNo.trim())) return null;
+    const cardId = Number(requestNo.trim());
+    if (!Number.isSafeInteger(cardId) || cardId <= 0) return null;
+    try {
+      return await this.getCard(cardId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/non-JSON content|failed: 404\b/.test(message)) return null;
+      throw error;
     }
-    return payload.map((card) => normalizeCard(card));
-  }
-
-  async findItemByField(workflow: 'WF-01', field: string, value: string): Promise<{ itemId: string } | null> {
-    const matches = await this.findItemsByField(workflow, field, value);
-    return matches[0] ? { itemId: matches[0].itemId } : null;
-  }
-
-  async findItemsByField(_workflow: 'WF-01', field: string, value: string): Promise<{ itemId: string; fields: Record<string, unknown> }[]> {
-    const filterTokens = [
-      { type: 'field', value: fieldKey(field) },
-      { type: 'operator', value: 'IS_EQUAL_TO' },
-      { type: 'text', value },
-      { type: 'operator', value: 'AND' },
-      { type: 'field', value: 'deleted' },
-      { type: 'operator', value: 'IS_EQUAL_TO' },
-      { type: 'boolean', value: false }
-    ];
-    const cards = await this.listCards(filterTokens);
-    return cards.map((card) => ({ itemId: card.itemId, fields: card.fields }));
   }
 
   async getCard(cardId: number): Promise<WorkHub24Card> {
@@ -269,21 +277,32 @@ export class HttpWorkHub24Client implements WorkHub24Client {
     await this.updateFields(itemId, { [tableId]: [...(Array.isArray(existing) ? existing as Record<string, unknown>[] : []), row] });
   }
 
-  async getOpenTaskId(cardId: string | number, taskName: string): Promise<string> {
+  async getOpenTaskId(
+    cardId: string | number,
+    taskName: string,
+    workflow: Workflow = 'WF-01',
+    options: TaskLookupOptions = {}
+  ): Promise<string> {
     const id = this.cardNumber(cardId);
     if (!config.WH24_VIEW_TASKS) throw new Error('WH24_VIEW_TASKS must be configured to look up open tasks.');
-    const deadline = Date.now() + 20_000;
+    const waitMs = Math.min(Math.max(0, options.waitForTaskMs ?? 0), MAX_TASK_WAIT_MS);
+    const deadline = Date.now() + waitMs;
 
     while (true) {
-      const params = new URLSearchParams({ Task_Name: taskName, Card_id: String(id) });
+      const params = new URLSearchParams({
+        Task_Name: taskName,
+        Card_id: String(id),
+        Workflow_Id: this.workflowId(workflow)
+      });
       const payload = await this.apiRequest(
         `/api/view/${encodeURIComponent(config.WH24_TENANT_ID)}/${encodeURIComponent(config.WH24_VIEW_TASKS)}?${params.toString()}`
       );
       if (!Array.isArray(payload) || !payload.every(isRecord)) {
         throw new Error('WorkHub24 task-history view response did not contain a JSON array of rows.');
       }
-      if (payload.length > 0) {
-        const taskId = payload[0].iD;
+      const openRows = openTaskRows(payload);
+      if (openRows.length > 0) {
+        const taskId = newestTaskRow(openRows).iD;
         if ((typeof taskId === 'string' && taskId.trim()) || (typeof taskId === 'number' && Number.isFinite(taskId))) {
           return String(taskId);
         }
@@ -315,7 +334,7 @@ export class HttpWorkHub24Client implements WorkHub24Client {
       const taskId = await this.getOpenTaskId(id, taskName);
       const fields = await prepareFields();
       await this.updateFields(String(id), fields);
-      await this.postTask(taskId, taskName);
+      await completeAfterUpdate(id, taskName, () => this.postTask(taskId, taskName));
     });
   }
 
@@ -323,6 +342,28 @@ export class HttpWorkHub24Client implements WorkHub24Client {
     await this.withCardLock(cardId, async () => {
       const id = this.cardNumber(cardId);
       const taskId = await this.getOpenTaskId(id, taskName);
+      await this.postTask(taskId, taskName);
+    });
+  }
+
+  async updateAndCompleteTaskForWorkflow(
+    workflow: Workflow,
+    cardId: string | number,
+    taskName: string,
+    fields: Record<string, unknown>,
+    options: TaskLookupOptions = {}
+  ): Promise<void> {
+    await this.withCardLock(cardId, async () => {
+      const id = this.cardNumber(cardId);
+      const taskId = await this.getOpenTaskId(id, taskName, workflow, options);
+      const mappedFields = Object.fromEntries(Object.entries(fields).map(([key, value]) => [
+        workflow === 'WF-02' ? wf02FieldKey(key) : fieldKey(key),
+        value
+      ]));
+      await this.apiRequest(`${this.workflowPath(workflow)}/cards/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify(mappedFields)
+      });
       await this.postTask(taskId, taskName);
     });
   }

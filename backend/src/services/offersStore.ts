@@ -14,7 +14,18 @@ export interface StoredOffer {
 
 export interface OffersRepository {
   get(requestNo: string): Promise<StoredOffer[]>;
-  add(offer: StoredOffer): Promise<{ offers: StoredOffer[]; added: boolean }>;
+  /** One insurer per request: replaces any offer already stored for offer.requestNo. */
+  save(offer: StoredOffer): Promise<void>;
+}
+
+function storedCopy(offer: StoredOffer): StoredOffer {
+  return {
+    requestNo: offer.requestNo,
+    insurer: offer.insurer,
+    packageRef: offer.packageRef,
+    respondedBy: offer.respondedBy,
+    respondedAt: offer.respondedAt
+  };
 }
 
 export interface OtpAttemptsRepository {
@@ -81,20 +92,11 @@ export class JsonOffersRepository implements OffersRepository {
     return offers.filter((offer) => offer.requestNo === requestNo);
   }
 
-  async add(offer: StoredOffer): Promise<{ offers: StoredOffer[]; added: boolean }> {
-    return this.runExclusive(async () => {
+  async save(offer: StoredOffer): Promise<void> {
+    await this.runExclusive(async () => {
       const current = parseStoredOffers(await readJson(this.path, []), this.path);
-      const offers = current.filter((existing) => existing.requestNo === offer.requestNo);
-      if (offers.length > 0) return { offers, added: false };
-      const updated = [...current, {
-        requestNo: offer.requestNo,
-        insurer: offer.insurer,
-        packageRef: offer.packageRef,
-        respondedBy: offer.respondedBy,
-        respondedAt: offer.respondedAt
-      }];
-      await writeJson(this.path, updated);
-      return { offers: [...offers, offer], added: true };
+      const others = current.filter((existing) => existing.requestNo !== offer.requestNo);
+      await writeJson(this.path, [...others, storedCopy(offer)]);
     });
   }
 
@@ -158,18 +160,8 @@ export class MemoryOffersRepository implements OffersRepository {
     return this.data.filter((offer) => offer.requestNo === requestNo);
   }
 
-  async add(offer: StoredOffer): Promise<{ offers: StoredOffer[]; added: boolean }> {
-    const offers = await this.get(offer.requestNo);
-    if (offers.length > 0) return { offers, added: false };
-    const stored = {
-      requestNo: offer.requestNo,
-      insurer: offer.insurer,
-      packageRef: offer.packageRef,
-      respondedBy: offer.respondedBy,
-      respondedAt: offer.respondedAt
-    };
-    this.data.push(stored);
-    return { offers: [...offers, stored], added: true };
+  async save(offer: StoredOffer): Promise<void> {
+    this.data = [...this.data.filter((existing) => existing.requestNo !== offer.requestNo), storedCopy(offer)];
   }
 }
 

@@ -4,7 +4,16 @@ export const OTP_WINDOW_MS = 5 * 60 * 1000;
 export const OTP_RESEND_SECONDS = 60;
 export const OTP_ATTEMPTS_LIMIT = 3;
 
-const otpStore = new Map<string, { hash: string; salt: string; expiresAt: number; attempts: number; locked: boolean }>();
+interface OtpRecord {
+  hash: string;
+  salt: string;
+  expiresAt: number;
+  attempts: number;
+  locked: boolean;
+  workHubCardId?: string;
+}
+
+const otpStore = new Map<string, OtpRecord>();
 
 export function otpKey(email: string, purpose: string, requestNo?: string): string {
   return `${email.toLowerCase()}|${purpose}|${requestNo ?? ''}`;
@@ -60,4 +69,19 @@ export function verifyOtp({ email, purpose, requestNo, code }: { email: string; 
 
 export function getOtpState(email: string, purpose: string, requestNo?: string) {
   return otpStore.get(otpKey(email, purpose, requestNo));
+}
+
+export function setOtpWorkHubCardId(email: string, purpose: string, requestNo: string | undefined, cardId: string): number | undefined {
+  const record = otpStore.get(otpKey(email, purpose, requestNo));
+  if (!record) return undefined;
+  record.workHubCardId = cardId;
+  return record.expiresAt;
+}
+
+export function takeOtpWorkHubCardId(email: string, purpose: string, requestNo?: string): string | undefined {
+  const record = otpStore.get(otpKey(email, purpose, requestNo));
+  if (!record) return undefined;
+  const cardId = record.workHubCardId;
+  record.workHubCardId = undefined;
+  return cardId;
 }

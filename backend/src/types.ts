@@ -5,8 +5,8 @@ export interface SessionUser {
   email: string;
   role: 'finance' | 'insurer';
   partner?: string;
-  branch?: string;
   insurer?: string;
+  insurerCode?: string;
   department?: string;
 }
 

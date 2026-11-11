@@ -6,10 +6,10 @@ import { ApiError } from '../errors.js';
 import { requireSession } from '../auth/middleware.js';
 import { getItemByRequestNo, getRequestSummary } from '../services/requestService.js';
 import { requireOpenTask } from '../services/taskAccess.js';
-import { calculatePremiumBreakdown, packageDisplayName } from '../services/matching.js';
+import { normalizePackageRow, priceForPackage, roundCurrency, splitCovers, type PackageRow } from '../services/matching.js';
 import type { OffersRepository, OtpAttemptsRepository } from '../services/offersStore.js';
 import type { WorkHub24Client } from '../wh24/client.js';
-import { tableColumnKey } from '../wh24/fields.js';
+import { REQUEST_STATUS } from '../wh24/fields.js';
 
 const selectSchema = z.object({ insurer: z.string().min(1), packageRef: z.string().min(1) });
 const otpSchema = z.object({ code: z.string().regex(/^\d{6}$/) });
@@ -24,10 +24,7 @@ function getRequestNo(req: Request): string {
   return typeof requestNo === 'string' ? requestNo : requestNo?.[0] ?? '';
 }
 
-function optionalCovers(value: unknown): string[] {
-  if (Array.isArray(value)) return value.map(String);
-  return String(value ?? '').split(',').map((cover) => cover.trim()).filter(Boolean);
-}
+const optionalCovers = splitCovers;
 
 function assertCanCompare(fields: Record<string, unknown>): void {
   if (String(fields.I2 ?? '').trim()) {
@@ -54,29 +51,35 @@ function getApiOffer(fields: Record<string, unknown>, sumInsured: number) {
   };
 }
 
-function toWebformOffers(rows: Record<string, unknown>[], packageRefs: Set<string>, sumInsured: number) {
-  return rows
-    .filter((row) => packageRefs.has(String(row.package_ref ?? '')))
-    .map((row) => {
-      const premiumRate = Number(row.premium_rate ?? row.rate);
-      const taxRate = Number(row.tax_rate);
-      if (!Number.isFinite(premiumRate) || !Number.isFinite(taxRate)) {
-        throw new Error(`Package ${String(row.package_ref ?? '')} has invalid premium or tax rates.`);
-      }
-      const breakdown = calculatePremiumBreakdown(sumInsured, premiumRate, taxRate);
-      return {
-        insurer: String(row.insurer ?? ''),
-        source: 'webform' as const,
-        packageRef: String(row.package_ref ?? ''),
-        packageName: packageDisplayName(row),
-        ...breakdown,
-        sumInsured,
-        excess: Number(row.excess ?? 0),
-        standardCovers: String(row.standard_covers ?? ''),
-        optionalCovers: optionalCovers(row.optional_covers),
-        validUntil: String(row.valid_to ?? '')
-      };
-    });
+function toWebformOffers(
+  packages: PackageRow[],
+  storedOffers: Awaited<ReturnType<OffersRepository['get']>>,
+  sumInsured: number
+) {
+  return storedOffers.flatMap((offer) => {
+    const pkg = packages.find((candidate) => candidate.packageRef === offer.packageRef);
+    if (!pkg) {
+      console.warn('Stored offer package is not in the packages view; leaving it out.', {
+        requestNo: offer.requestNo,
+        packageRef: offer.packageRef
+      });
+      return [];
+    }
+    const breakdown = priceForPackage(pkg, sumInsured);
+    return [{
+      // The offers store records which insurer responded; the package row may only carry a code.
+      insurer: offer.insurer || pkg.insurerName,
+      source: 'webform' as const,
+      packageRef: pkg.packageRef,
+      packageName: pkg.name,
+      ...breakdown,
+      sumInsured,
+      excess: pkg.excess,
+      standardCovers: pkg.standardCovers,
+      optionalCovers: pkg.optionalCovers,
+      validUntil: pkg.validTo
+    }];
+  });
 }
 
 async function getWebformOffers(
@@ -84,35 +87,39 @@ async function getWebformOffers(
   storedOffers: Awaited<ReturnType<OffersRepository['get']>>,
   sumInsured: number
 ) {
-  const packageRefs = new Set(storedOffers.map((offer) => offer.packageRef));
-  if (!packageRefs.size) return [];
+  if (!storedOffers.length) return [];
 
-  let rows = await client.queryDatastore('ds_package', {});
+  // The packages view is never cached, so a package WorkHub24 just created is visible here.
+  const load = async () => (await client.queryDatastore('ds_package', {})).map(normalizePackageRow);
+  let packages = await load();
   const missingNewPackage = storedOffers.some((offer) =>
-    offer.packageRef.includes('-NEW-') && !rows.some((row) => String(row.package_ref ?? '') === offer.packageRef)
+    offer.packageRef.includes('-NEW-') && !packages.some((pkg) => pkg.packageRef === offer.packageRef)
   );
   if (missingNewPackage) {
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    rows = await client.queryDatastore('ds_package', {});
+    packages = await load();
   }
-  return toWebformOffers(rows, packageRefs, sumInsured);
+  return toWebformOffers(packages, storedOffers, sumInsured);
 }
 
-function getSelectedInsurerDetails(fields: Record<string, unknown>, insurer: string) {
-  const rows = Array.isArray(fields.F1) ? fields.F1 : [];
-  const matchingRow = rows.find((row) => {
-    if (typeof row === 'string') return row === insurer;
-    if (typeof row !== 'object' || row === null) return false;
-    return String((row as Record<string, unknown>)[tableColumnKey('F1', 'insurer')] ?? '') === insurer;
-  });
-  if (typeof matchingRow !== 'object' || matchingRow === null) {
+/**
+ * Selected insurer's email and connection type, from the insurers view
+ * (iD, insurerCode, name, connectionType, contactEmail, apiUrl, active), matched by name or code.
+ */
+async function getSelectedInsurerDetails(client: WorkHub24Client, insurer: string) {
+  const rows = await client.queryDatastore('ds_insurer', {});
+  const row = rows.find((candidate) => String(candidate.name ?? '') === insurer) ??
+    rows.find((candidate) => String(candidate.insurerCode ?? '') === insurer);
+  if (!row) {
+    console.warn('Selected insurer has no row in the insurers view; email and connection type use fallbacks.', { insurer });
     return { connection: '', email: '' };
   }
-  const row = matchingRow as Record<string, unknown>;
-  return {
-    connection: String(row[tableColumnKey('F1', 'connection')] ?? ''),
-    email: String(row[tableColumnKey('F1', 'insurerEmail')] ?? '')
-  };
+  return { connection: String(row.connectionType ?? ''), email: String(row.contactEmail ?? '') };
+}
+
+/** Premium totals are written to WH24 as numbers rounded to cents. */
+function premiumNumber(value: unknown): number {
+  return roundCurrency(Number(value ?? 0));
 }
 
 function getFinanceUser(req: Request): { name: string } {
@@ -196,7 +203,7 @@ export function createFinanceRoutes(
         });
       }
 
-      const details = getSelectedInsurerDetails(requestItem.fields, selectedOffer.insurer);
+      const details = await getSelectedInsurerDetails(wh24Client, selectedOffer.insurer);
       const user = getFinanceUser(req);
       const customerOTP = String(randomInt(100000, 1_000_000));
       await wh24Client.updateAndCompleteTask(requestItem.itemId, 'Awaiting Package Selection', () => ({
@@ -205,9 +212,10 @@ export function createFinanceRoutes(
           I3: details.connection || (selectedOffer.source === 'api' ? 'API' : 'Webform'),
           I4: details.email,
           I5: selectedOffer.packageRef,
-          I5a: selectedOffer.total,
+          I5a: premiumNumber(selectedOffer.total),
           I11: selectedOffer.packageName,
-          I6: customerOTP
+          I6: customerOTP,
+          A3: REQUEST_STATUS.awaitingConsent
         }));
       return res.status(200).json({ mobileLast3: lastThree(String(requestItem.fields.B4 ?? '')) });
     } catch (error) {
@@ -233,7 +241,10 @@ export function createFinanceRoutes(
       if (body.code === String(requestItem.fields.I6 ?? '')) {
         await wh24Client.updateAndCompleteTask(requestItem.itemId, 'Awaiting OTP Verification', () => ({
           I7: 'Verified',
-          I8: new Date().toISOString()
+          I8: new Date().toISOString(),
+          // Same number as selectedTotalPremiumLKR, so both totals are written the same way.
+          I12: premiumNumber(requestItem.fields.I5a),
+          A3: REQUEST_STATUS.awaitingPolicy
         }));
         await otpAttemptsRepository.clear(requestNo);
         return res.json({ result: 'verified', attemptsLeft: 0 });
@@ -241,6 +252,7 @@ export function createFinanceRoutes(
 
       const updatedAttempts = await otpAttemptsRepository.increment(requestNo);
       if (updatedAttempts >= 3) {
+        // Wrong code three times: a new code is sent; status (A3) stays as it is.
         await wh24Client.updateAndCompleteTask(requestItem.itemId, 'Awaiting OTP Verification', () => ({
           I6: String(randomInt(100000, 1_000_000)),
           I7: 'Failed'

@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { useApi } from '../api/client';
-import { ApiError, type ApiErrorCode, type Purpose, type Session } from '../api/types';
+import { ApiError, type ApiErrorCode, type Purpose, type Session, type SignInScreen } from '../api/types';
 import { mmss } from '../lib/format';
 import { useCountdown } from '../lib/session';
 import { V } from '../lib/validators';
@@ -17,7 +17,7 @@ const HOW = [
 ];
 
 /** Email + SMS code sign-in shown in front of every screen. */
-export function OtpGate(p: { purpose: Purpose; requestNo?: string; onVerified: (s: Session) => void; sessionEnded?: boolean; context?: string }) {
+export function OtpGate(p: { purpose: Purpose; requestNo?: string; screen?: SignInScreen; onVerified: (s: Session) => void; sessionEnded?: boolean; context?: string }) {
   const api = useApi();
   const [stage, setStage] = useState<'email' | 'code'>('email');
   const [email, setEmail] = useState('');
@@ -38,7 +38,7 @@ export function OtpGate(p: { purpose: Purpose; requestNo?: string; onVerified: (
     setBusy(true);
     setFormError('');
     try {
-      const r = await api.requestOtp({ email: email.trim(), purpose: p.purpose, requestNo: p.requestNo });
+      const r = await api.requestOtp({ email: email.trim(), purpose: p.purpose, requestNo: p.requestNo, screen: p.screen });
       setResendFrom(r.resendAfterSeconds);
       setSendCount((n) => n + 1);
       setAttemptsLeft(3);
@@ -70,7 +70,7 @@ export function OtpGate(p: { purpose: Purpose; requestNo?: string; onVerified: (
     setBusy(true);
     setFormError('');
     try {
-      const s = await api.verifyOtp({ email: email.trim(), code, purpose: p.purpose, requestNo: p.requestNo });
+      const s = await api.verifyOtp({ email: email.trim(), code, purpose: p.purpose, requestNo: p.requestNo, screen: p.screen });
       p.onVerified(s);
     } catch (e) {
       const err = e as ApiError;
