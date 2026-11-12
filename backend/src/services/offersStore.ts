@@ -1,21 +1,29 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const defaultOffersFile = resolve(process.cwd(), 'data', 'offers.json');
-const defaultOtpAttemptsFile = resolve(process.cwd(), 'data', 'customer-otp-attempts.json');
+// Always backend/data/ (gitignored), whatever directory the server is started from.
+const dataDirectory = new URL('../../data/', import.meta.url);
+const defaultOffersFile = fileURLToPath(new URL('offers.json', dataDirectory));
+const defaultOtpAttemptsFile = fileURLToPath(new URL('customer-otp-attempts.json', dataDirectory));
 
+/** One offered package. A response with several packages is stored as one offer per package. */
 export interface StoredOffer {
   requestNo: string;
   insurer: string;
   packageRef: string;
+  /** Premium figures calculated for this request's sum insured when the insurer responded. */
+  premium?: number;
+  taxes?: number;
+  total?: number;
   respondedBy: string;
   respondedAt: string;
 }
 
 export interface OffersRepository {
   get(requestNo: string): Promise<StoredOffer[]>;
-  /** One insurer per request: replaces any offer already stored for offer.requestNo. */
-  save(offer: StoredOffer): Promise<void>;
+  /** One insurer per request: replaces every offer already stored for requestNo with these. */
+  replace(requestNo: string, offers: StoredOffer[]): Promise<void>;
 }
 
 function storedCopy(offer: StoredOffer): StoredOffer {
@@ -23,9 +31,19 @@ function storedCopy(offer: StoredOffer): StoredOffer {
     requestNo: offer.requestNo,
     insurer: offer.insurer,
     packageRef: offer.packageRef,
+    ...(offer.premium !== undefined ? { premium: offer.premium } : {}),
+    ...(offer.taxes !== undefined ? { taxes: offer.taxes } : {}),
+    ...(offer.total !== undefined ? { total: offer.total } : {}),
     respondedBy: offer.respondedBy,
     respondedAt: offer.respondedAt
   };
+}
+
+function offersFor(requestNo: string, offers: StoredOffer[]): StoredOffer[] {
+  if (offers.some((offer) => offer.requestNo !== requestNo)) {
+    throw new Error(`Every offer must belong to request ${requestNo}.`);
+  }
+  return offers.map(storedCopy);
 }
 
 export interface OtpAttemptsRepository {
@@ -60,13 +78,11 @@ function normalizeStoredOffer(value: unknown): StoredOffer | null {
       typeof row.packageRef !== 'string' ||
       typeof row.respondedBy !== 'string' ||
       typeof row.respondedAt !== 'string') return null;
-  return {
-    requestNo: row.requestNo,
-    insurer: row.insurer,
-    packageRef: row.packageRef,
-    respondedBy: row.respondedBy,
-    respondedAt: row.respondedAt
-  };
+  // Offers stored before premiums were recorded have no figures; Screen 3 then prices from the package.
+  for (const key of ['premium', 'taxes', 'total'] as const) {
+    if (row[key] !== undefined && typeof row[key] !== 'number') return null;
+  }
+  return storedCopy(row as unknown as StoredOffer);
 }
 
 function parseStoredOffers(data: Record<string, unknown> | unknown[], path: string): StoredOffer[] {
@@ -92,11 +108,12 @@ export class JsonOffersRepository implements OffersRepository {
     return offers.filter((offer) => offer.requestNo === requestNo);
   }
 
-  async save(offer: StoredOffer): Promise<void> {
+  async replace(requestNo: string, offers: StoredOffer[]): Promise<void> {
+    const copies = offersFor(requestNo, offers);
     await this.runExclusive(async () => {
       const current = parseStoredOffers(await readJson(this.path, []), this.path);
-      const others = current.filter((existing) => existing.requestNo !== offer.requestNo);
-      await writeJson(this.path, [...others, storedCopy(offer)]);
+      const others = current.filter((existing) => existing.requestNo !== requestNo);
+      await writeJson(this.path, [...others, ...copies]);
     });
   }
 
@@ -160,8 +177,9 @@ export class MemoryOffersRepository implements OffersRepository {
     return this.data.filter((offer) => offer.requestNo === requestNo);
   }
 
-  async save(offer: StoredOffer): Promise<void> {
-    this.data = [...this.data.filter((existing) => existing.requestNo !== offer.requestNo), storedCopy(offer)];
+  async replace(requestNo: string, offers: StoredOffer[]): Promise<void> {
+    const copies = offersFor(requestNo, offers);
+    this.data = [...this.data.filter((existing) => existing.requestNo !== requestNo), ...copies];
   }
 }
 

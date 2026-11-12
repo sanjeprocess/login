@@ -112,12 +112,15 @@ export interface InsurerResponseView {
   insurerName: string;
   recommended: StoredPackage[];
   vehicleCategories: string[];
-  submission?: { submittedBy: string; submittedAt?: string; package: StoredPackage };
+  submission?: { submittedBy: string; submittedAt?: string; packages: StoredPackage[] };
 }
 
-export type InsurerResponseInput =
-  | { mode: 'stored'; packageRef: string; remarks?: string }
-  | { mode: 'new'; package: NewPackageInput; remarks?: string };
+/** Screen 2: any of the insurer's matching packages and/or one new package; at least one in total. */
+export interface InsurerResponseInput {
+  packageRefs: string[];
+  newPackage?: NewPackageInput;
+  remarks?: string;
+}
 
 export interface Offer {
   insurer: string;
@@ -196,6 +199,10 @@ export type ApiErrorCode =
   | 'NOT_AUTHORISED'
   | 'ALREADY_SUBMITTED'
   | 'REQUEST_CLOSED'
+  /** The previous step was just completed; WorkHub24 is still opening this one. Re-check shortly. */
+  | 'PENDING'
+  /** The request has not reached this step yet. */
+  | 'NOT_READY'
   | 'OTP_INCORRECT'
   | 'OTP_EXPIRED'
   | 'OTP_LOCKED'

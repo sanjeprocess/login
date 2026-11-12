@@ -57,7 +57,7 @@ export function createApp({
     }
 
     if (err instanceof ApiError) {
-      const status = err.code === 'SESSION_EXPIRED' ? 401 : err.code === 'OTP_LOCKED' ? 429 : err.code === 'LINK_INVALID' ? 404 : err.code === 'NOT_AUTHORISED' ? 403 : err.code === 'REQUEST_CLOSED' ? 410 : err.code === 'DUPLICATE_CHASSIS' || err.code === 'ALREADY_SUBMITTED' ? 409 : err.code === 'OTP_INCORRECT' || err.code === 'OTP_EXPIRED' ? 400 : err.code === 'VALIDATION' ? 422 : 500;
+      const status = err.code === 'SESSION_EXPIRED' ? 401 : err.code === 'OTP_LOCKED' ? 429 : err.code === 'LINK_INVALID' ? 404 : err.code === 'NOT_AUTHORISED' ? 403 : err.code === 'REQUEST_CLOSED' ? 410 : err.code === 'DUPLICATE_CHASSIS' || err.code === 'ALREADY_SUBMITTED' || err.code === 'PENDING' || err.code === 'NOT_READY' ? 409 : err.code === 'OTP_INCORRECT' || err.code === 'OTP_EXPIRED' ? 400 : err.code === 'VALIDATION' ? 422 : 500;
       return res.status(status).json(errorResponse(err));
     }
 

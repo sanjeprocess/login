@@ -51,28 +51,32 @@ function getLastOtp(client: FakeWorkHub24Client) {
 }
 
 describe('Motor Insurance Gateway backend', () => {
-  it('persists only response references in the offers store', async () => {
+  it('persists response references and premiums in the offers file, one row per package', async () => {
     const directory = mkdtempSync(join(tmpdir(), 'insurance-offers-'));
     uploadDirectories.push(directory);
-    const repository = new JsonOffersRepository(join(directory, 'offers.json'));
+    const path = join(directory, 'offers.json');
+    const repository = new JsonOffersRepository(path);
     const offer = {
       requestNo: 'MIG-2026-0148',
       insurer: 'Insurer A',
       packageRef: 'A-COMP-STD',
+      premium: 238000,
+      taxes: 49980,
+      total: 287980,
       respondedBy: 'dilani.w@insurer-a.lk',
       respondedAt: '2026-11-11T00:00:00.000Z'
     };
+    const plus = { ...offer, packageRef: 'A-COMP-PLUS' };
 
-    await repository.save({ ...offer, packageRef: 'A-COMP-PLUS' });
-    await repository.save(offer);
-    await repository.save({ ...offer, requestNo: 'MIG-2026-0149' });
+    await repository.replace(offer.requestNo, [plus]);
+    await repository.replace(offer.requestNo, [offer, plus]);
+    await repository.replace('MIG-2026-0149', [{ ...offer, requestNo: 'MIG-2026-0149' }]);
 
-    // One offer per request: a resubmit overwrites, other requests are untouched.
-    expect(JSON.parse(readFileSync(join(directory, 'offers.json'), 'utf8'))).toEqual([
-      offer,
-      { ...offer, requestNo: 'MIG-2026-0149' }
-    ]);
-    expect(await repository.get(offer.requestNo)).toEqual([offer]);
+    // A resubmit replaces the request's offers; other requests are untouched.
+    expect(JSON.parse(readFileSync(path, 'utf8'))).toEqual([offer, plus, { ...offer, requestNo: 'MIG-2026-0149' }]);
+    // A new repository on the same file (a backend restart) sees the same offers.
+    expect(await new JsonOffersRepository(path).get(offer.requestNo)).toEqual([offer, plus]);
+    await expect(repository.replace(offer.requestNo, [{ ...offer, requestNo: 'OTHER' }])).rejects.toThrow(/must belong/);
   });
 
   it('stores the Screen 2 offer only after WH24 succeeds, and allows a retry after a failure', async () => {
@@ -98,7 +102,7 @@ describe('Motor Insurance Gateway backend', () => {
     const submit = (packageRef: string) => request(app)
       .post('/api/insurer/requests/MIG-2026-0148/response')
       .set('Authorization', `Bearer ${insurerToken}`)
-      .send({ mode: 'stored', packageRef });
+      .send({ packageRefs: [packageRef] });
 
     const failed = await submit('A-COMP-STD');
     expect(failed.status).toBe(500);
@@ -112,10 +116,10 @@ describe('Motor Insurance Gateway backend', () => {
   it('overwrites a half-finished offer while the Screen 2 task is still open', async () => {
     const client = new FakeWorkHub24Client();
     const offers = new MemoryOffersRepository();
-    await offers.save({
+    await offers.replace('MIG-2026-0148', [{
       requestNo: 'MIG-2026-0148', insurer: 'Insurer A', packageRef: 'A-COMP-PLUS',
       respondedBy: 'dilani.w@insurer-a.lk', respondedAt: '2026-11-10T00:00:00.000Z'
-    });
+    }]);
     const app = createTestApp(client, offers);
     const insurerToken = await loginAsInsurer(app, client);
 
@@ -128,7 +132,7 @@ describe('Motor Insurance Gateway backend', () => {
     const resubmitted = await request(app)
       .post('/api/insurer/requests/MIG-2026-0148/response')
       .set('Authorization', `Bearer ${insurerToken}`)
-      .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
+      .send({ packageRefs: ['A-COMP-STD'] });
     expect(resubmitted.status).toBe(204);
     expect((await offers.get('MIG-2026-0148')).map((offer) => offer.packageRef)).toEqual(['A-COMP-STD']);
   });
@@ -386,7 +390,8 @@ describe('Motor Insurance Gateway backend', () => {
       });
 
     expect(response.status).toBe(409);
-    expect(response.body.error.code).toBe('ALREADY_SUBMITTED');
+    // Status is still Awaiting Quotes: Screen 3 is not open yet, which is not "already submitted".
+    expect(response.body.error.code).toBe('NOT_READY');
     expect(Array.from((client as any).items.values()).filter((item: any) => item.workflow === 'WF-02')).toHaveLength(0);
   });
 
@@ -459,7 +464,7 @@ describe('Motor Insurance Gateway backend', () => {
     const submitted = await request(app)
       .post('/api/insurer/requests/MIG-2026-0148/response')
       .set('Authorization', `Bearer ${insurerToken}`)
-      .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
+      .send({ packageRefs: ['A-COMP-STD'] });
     expect(submitted.status).toBe(204);
     expect((await client.getItem('wf-01-0148')).fields.G19).toBe('No');
 
@@ -467,10 +472,12 @@ describe('Motor Insurance Gateway backend', () => {
     const app2 = createTestApp(client2);
     const token2 = await loginAsInsurer(app2, client2);
     client2.setOpenTask('wf-01-0148', 'Awaiting Package Selection');
+    // As after a real Screen 2 submit: the status is past Screen 2's step.
+    await client2.updateFields('wf-01-0148', { A3: REQUEST_STATUS.awaitingSelection });
     const closed = await request(app2)
       .post('/api/insurer/requests/MIG-2026-0148/response')
       .set('Authorization', `Bearer ${token2}`)
-      .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
+      .send({ packageRefs: ['A-COMP-STD'] });
     expect(closed.status).toBe(409);
     expect(closed.body.error.code).toBe('ALREADY_SUBMITTED');
   });
@@ -540,7 +547,7 @@ describe('Motor Insurance Gateway backend', () => {
     const insurerResponse = await request(app)
       .post('/api/insurer/requests/MIG-2026-0148/response')
       .set('Authorization', `Bearer ${insurerToken}`)
-      .send({ mode: 'stored', packageRef: 'A-COMP-STD', remarks: 'Looks good' });
+      .send({ packageRefs: ['A-COMP-STD'], remarks: 'Looks good' });
     expect(insurerResponse.status).toBe(204);
     expect(client.completedTasks.at(-1)?.taskName).toBe('Awaiting Insurer Responses');
     expect((await client.getItem('wf-01-0148')).fields.A3).toBe(REQUEST_STATUS.awaitingSelection);
@@ -580,6 +587,73 @@ describe('Motor Insurance Gateway backend', () => {
     expect(closedCompare.body.error.code).toBe('ALREADY_SUBMITTED');
   });
 
+  it('reports PENDING in the gap before WorkHub24 opens the next task, then lets each screen continue', async () => {
+    const client = new FakeWorkHub24Client();
+    const app = createTestApp(client);
+    const financeToken = await loginAsFinance(app, client);
+    const insurerToken = await loginAsInsurer(app, client);
+    // WorkHub24 runs automated steps (e.g. the customer SMS) before the next task exists.
+    client.nextTaskDelayMs = 150;
+    const offers = () => request(app).get('/api/finance/requests/MIG-2026-0148/offers').set('Authorization', `Bearer ${financeToken}`);
+    const binding = () => request(app).get('/api/insurer/requests/MIG-2026-0148/binding').set('Authorization', `Bearer ${insurerToken}`);
+    const waitFor200 = (load: () => Promise<request.Response>) =>
+      vi.waitFor(async () => expect((await load()).status).toBe(200), { timeout: 2_000, interval: 50 });
+
+    // Screen 2 -> Screen 3
+    const response = await request(app)
+      .post('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${insurerToken}`)
+      .send({ packageRefs: ['A-COMP-STD'] });
+    expect(response.status).toBe(204);
+    const gap1 = await offers();
+    expect(gap1.status).toBe(409);
+    expect(gap1.body.error.code).toBe('PENDING');
+    await waitFor200(offers);
+
+    // Screen 3 select -> customer code entry
+    const select = await request(app).post('/api/finance/requests/MIG-2026-0148/select')
+      .set('Authorization', `Bearer ${financeToken}`).send({ insurer: 'Insurer A', packageRef: 'A-COMP-STD' });
+    expect(select.status).toBe(200);
+    const gap2 = await offers();
+    expect(gap2.body.error).toMatchObject({ code: 'PENDING', message: expect.stringMatching(/sending the code/i) });
+    await waitFor200(offers);
+    expect((await offers()).body.status).toBe('awaiting_customer_otp');
+
+    // Code verified -> Screen 4
+    const code = String((await client.getItem('wf-01-0148')).fields.I6);
+    const verify = await request(app).post('/api/finance/requests/MIG-2026-0148/customer-otp')
+      .set('Authorization', `Bearer ${financeToken}`).send({ code });
+    expect(verify.body.result).toBe('verified');
+    const gap3 = await binding();
+    expect(gap3.status).toBe(409);
+    expect(gap3.body.error.code).toBe('PENDING');
+    await waitFor200(binding);
+
+    // Status is past Screen 3's step: really already done, not pending.
+    const done = await offers();
+    expect(done.body.error.code).toBe('ALREADY_SUBMITTED');
+  });
+
+  it('only reports ALREADY_SUBMITTED once the status is past the screen\'s step', async () => {
+    const client = new FakeWorkHub24Client();
+    const app = createTestApp(client);
+    const insurerToken = await loginAsInsurer(app, client);
+    const binding = () => request(app).get('/api/insurer/requests/MIG-2026-0148/binding').set('Authorization', `Bearer ${insurerToken}`);
+    await client.updateFields('wf-01-0148', { I2: 'Insurer A' });
+    client.setOpenTask('wf-01-0148', 'Awaiting OTP Verification');
+
+    // Customer has not confirmed yet: Screen 4 is not open yet, not "already submitted".
+    await client.updateFields('wf-01-0148', { A3: REQUEST_STATUS.awaitingConsent });
+    expect((await binding()).body.error.code).toBe('NOT_READY');
+    // Verified but the task is not there: the handover gap.
+    client.setOpenTask('wf-01-0148', 'None');
+    await client.updateFields('wf-01-0148', { A3: REQUEST_STATUS.awaitingPolicy, I7: 'Verified' });
+    expect((await binding()).body.error.code).toBe('PENDING');
+    // Completed: closed.
+    await client.updateFields('wf-01-0148', { A3: REQUEST_STATUS.completed });
+    expect((await binding()).body.error.code).toBe('REQUEST_CLOSED');
+  });
+
   it('stores one offer per insurer and moves status to Awaiting Selection', async () => {
     const client = new FakeWorkHub24Client();
     const offers = new MemoryOffersRepository();
@@ -592,7 +666,7 @@ describe('Motor Insurance Gateway backend', () => {
     const submitted = await request(app)
       .post('/api/insurer/requests/MIG-2026-0148/response')
       .set('Authorization', `Bearer ${insurerToken}`)
-      .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
+      .send({ packageRefs: ['A-COMP-STD'] });
     expect(submitted.status).toBe(204);
     expect((await client.getItem('wf-01-0148')).fields.A3).toBe(REQUEST_STATUS.awaitingSelection);
     expect(client.completedTasks.at(-1)?.taskName).toBe('Awaiting Insurer Responses');
@@ -606,7 +680,7 @@ describe('Motor Insurance Gateway backend', () => {
     const duplicate = await request(app)
       .post('/api/insurer/requests/MIG-2026-0148/response')
       .set('Authorization', `Bearer ${insurerToken}`)
-      .send({ mode: 'stored', packageRef: 'A-COMP-PLUS' });
+      .send({ packageRefs: ['A-COMP-PLUS'] });
     expect(duplicate.status).toBe(409);
     expect(duplicate.body.error.code).toBe('ALREADY_SUBMITTED');
     const [storedOffer] = await offers.get('MIG-2026-0148');
@@ -614,9 +688,66 @@ describe('Motor Insurance Gateway backend', () => {
       requestNo: 'MIG-2026-0148',
       insurer: 'Insurer A',
       packageRef: 'A-COMP-STD',
+      premium: 238000,
+      taxes: 49980,
+      total: 287980,
       respondedBy: 'dilani.w@insurer-a.lk'
     });
-    expect(Object.keys(storedOffer).sort()).toEqual(['insurer', 'packageRef', 'requestNo', 'respondedAt', 'respondedBy']);
+    expect(Object.keys(storedOffer).sort()).toEqual(['insurer', 'packageRef', 'premium', 'requestNo', 'respondedAt', 'respondedBy', 'taxes', 'total']);
+  });
+
+  it('lists the insurer\'s matching packages and stores each chosen package as its own offer', async () => {
+    const client = new FakeWorkHub24Client();
+    const offers = new MemoryOffersRepository();
+    const app = createTestApp(client, offers);
+    const insurerToken = await loginAsInsurer(app, client);
+
+    const view = await request(app)
+      .get('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${insurerToken}`);
+    // Only Insurer A's (INSA) packages; Insurer B's B-COMP-01 is not listed.
+    expect(view.body.recommended.map((pkg: any) => pkg.packageRef).sort()).toEqual(['A-COMP-PLUS', 'A-COMP-STD']);
+
+    const none = await request(app)
+      .post('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${insurerToken}`)
+      .send({ packageRefs: [] });
+    expect(none.status).toBe(422);
+    expect(none.body.error.code).toBe('VALIDATION');
+    const foreign = await request(app)
+      .post('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${insurerToken}`)
+      .send({ packageRefs: ['A-COMP-STD', 'B-COMP-01'] });
+    expect(foreign.status).toBe(422);
+    expect(client.completedTasks.some((task) => task.taskName === 'Awaiting Insurer Responses')).toBe(false);
+
+    const submitted = await request(app)
+      .post('/api/insurer/requests/MIG-2026-0148/response')
+      .set('Authorization', `Bearer ${insurerToken}`)
+      .send({
+        packageRefs: ['A-COMP-STD', 'A-COMP-PLUS', 'A-COMP-STD'],
+        newPackage: {
+          name: 'Custom Comprehensive', coverType: 'Comprehensive', vehicleCategory: 'Motor car',
+          sumMin: 8000000, sumMax: 9000000, premiumRate: 2.8, taxes: 24990, excess: 30000,
+          standardCovers: 'Own damage, theft', optionalCovers: [], validUntil: '2026-12-31'
+        }
+      });
+    expect(submitted.status).toBe(204);
+    expect((await client.getItem('wf-01-0148')).fields.G19).toBe('Yes');
+    const stored = await offers.get('MIG-2026-0148');
+    expect(stored.map((offer) => offer.packageRef)).toEqual(['A-COMP-STD', 'A-COMP-PLUS', 'INSA-NEW-MIG-2026-0148']);
+    expect(stored[2]).toMatchObject({ premium: 238000, taxes: 24990, total: 262990 });
+    expect(new Set(stored.map((offer) => offer.respondedAt)).size).toBe(1);
+
+    // Screen 3 lists the stored packages (the new one appears once WH24 adds it to the packages view).
+    const financeToken = await loginAsFinance(app, client);
+    const compare = await request(app)
+      .get('/api/finance/requests/MIG-2026-0148/offers')
+      .set('Authorization', `Bearer ${financeToken}`);
+    expect(compare.status).toBe(200);
+    const webform = compare.body.offers.filter((offer: any) => offer.source === 'webform');
+    expect(webform.map((offer: any) => offer.packageRef).sort()).toEqual(['A-COMP-PLUS', 'A-COMP-STD']);
+    expect(webform.find((offer: any) => offer.packageRef === 'A-COMP-STD')).toMatchObject({ total: 287980, insurer: 'Insurer A' });
   });
 
   it('writes new-package details before completing the insurer response task', async () => {
@@ -628,8 +759,8 @@ describe('Motor Insurance Gateway backend', () => {
       .post('/api/insurer/requests/MIG-2026-0148/response')
       .set('Authorization', `Bearer ${insurerToken}`)
       .send({
-        mode: 'new',
-        package: {
+        packageRefs: [],
+        newPackage: {
           name: 'Custom Comprehensive',
           coverType: 'Comprehensive',
           vehicleCategory: 'Motor car',
@@ -692,8 +823,7 @@ describe('Motor Insurance Gateway backend', () => {
         .post('/api/insurer/requests/MIG-2026-0148/response')
         .set('Authorization', `Bearer ${insurerToken}`)
         .send({
-          mode: 'new',
-          package: {
+          newPackage: {
             name: 'Custom Comprehensive', coverType: 'Comprehensive', vehicleCategory: 'Motor car',
             sumMin: 8000000, sumMax: 9000000, premiumRate: 2.8, taxes: 24990, excess: 30000,
             standardCovers: 'Own damage, theft', optionalCovers: [], validUntil: '2026-12-31'
@@ -718,7 +848,7 @@ describe('Motor Insurance Gateway backend', () => {
       const submitted = await request(app)
         .post('/api/insurer/requests/MIG-2026-0148/response')
         .set('Authorization', `Bearer ${insurerToken}`)
-        .send({ mode: 'stored', packageRef: 'A-COMP-STD' });
+        .send({ packageRefs: ['A-COMP-STD'] });
 
       expect(submitted.status).toBe(204);
       expect((await client.getItem('wf-01-0148')).fields[CURRENT_PACKAGE_INSURER_CODE]).toBeUndefined();
@@ -765,8 +895,7 @@ describe('Motor Insurance Gateway backend', () => {
       .post('/api/insurer/requests/MIG-2026-0148/response')
       .set('Authorization', `Bearer ${insurerToken}`)
       .send({
-        mode: 'new',
-        package: {
+        newPackage: {
           name: 'Delayed Package',
           coverType: 'Comprehensive',
           vehicleCategory: 'Motor car',

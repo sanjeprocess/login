@@ -15,6 +15,7 @@ import {
   normalizePackageRow,
   packageBelongsTo,
   priceForPackage,
+  roundCurrency,
   type PackageRow
 } from '../services/matching.js';
 import { JsonOffersRepository, type OffersRepository } from '../services/offersStore.js';
@@ -27,26 +28,25 @@ import { config } from '../config.js';
 export const CURRENT_PACKAGE_INSURER_CODE = 'G7a';
 let warnedInsurerCodeUnmapped = false;
 
-const responseSchema = z.union([
-  z.object({ mode: z.literal('stored'), packageRef: z.string().min(1), remarks: z.string().optional() }),
-  z.object({
-    mode: z.literal('new'),
-    remarks: z.string().optional(),
-    package: z.object({
-      name: z.string().min(1),
-      coverType: z.enum(['Comprehensive', 'Third Party']),
-      vehicleCategory: z.string().min(1),
-      sumMin: z.number().positive(),
-      sumMax: z.number().positive(),
-      premiumRate: z.number().nonnegative(),
-      taxes: z.number().nonnegative(),
-      excess: z.number().nonnegative(),
-      standardCovers: z.string(),
-      optionalCovers: z.array(z.string()),
-      validUntil: z.string().min(1)
-    })
-  })
-]);
+// One response may offer several packages: any of the insurer's matching stored packages
+// (packageRefs) and/or one new package. At least one is required.
+const responseSchema = z.object({
+  packageRefs: z.array(z.string().min(1)).max(50).default([]),
+  newPackage: z.object({
+    name: z.string().min(1),
+    coverType: z.enum(['Comprehensive', 'Third Party']),
+    vehicleCategory: z.string().min(1),
+    sumMin: z.number().positive(),
+    sumMax: z.number().positive(),
+    premiumRate: z.number().nonnegative(),
+    taxes: z.number().nonnegative(),
+    excess: z.number().nonnegative(),
+    standardCovers: z.string(),
+    optionalCovers: z.array(z.string()),
+    validUntil: z.string().min(1)
+  }).optional(),
+  remarks: z.string().optional()
+});
 
 const bindingUpload = multer({
   storage: multer.memoryStorage(),
@@ -165,54 +165,72 @@ export function createInsurerRoutes(
       await requireOpenTask(wh24Client, requestItem, 'Awaiting Insurer Responses');
 
       const insurerName = getInsurerName(req);
+      const identity = getInsurerIdentity(req);
       const sumInsured = Number(requestItem.fields.E2 ?? 0);
-      let packageRef: string;
-      let packageFields: Record<string, unknown>;
-      if (body.mode === 'stored') {
-        const packages = await loadPackages(wh24Client);
-        const selected = recommendedPackages(packages, getInsurerIdentity(req), requestItem)
-          .find((pkg) => pkg.packageRef === body.packageRef);
-        if (!selected) {
+      const packageRefs = [...new Set(body.packageRefs)];
+      if (!packageRefs.length && !body.newPackage) {
+        throw new ApiError('VALIDATION', 'Choose at least one package or enter a new one.', {
+          fields: { packageRefs: 'Choose at least one package or enter a new one.' }
+        });
+      }
+
+      // Every chosen package becomes its own offer, priced for this request's sum insured.
+      const offered: { packageRef: string; premium: number; taxes: number; total: number }[] = [];
+      if (packageRefs.length) {
+        const available = recommendedPackages(await loadPackages(wh24Client), identity, requestItem);
+        const unknown = packageRefs.filter((ref) => !available.some((pkg) => pkg.packageRef === ref));
+        if (unknown.length) {
           throw new ApiError('VALIDATION', 'Selected package not found for insurer.', {
-            fields: { packageRef: 'Unknown or unavailable package.' }
+            fields: { packageRefs: `Unknown or unavailable package: ${unknown.join(', ')}.` }
           });
         }
-        packageRef = selected.packageRef;
-        // Existing package: only flag it. The package itself is already in the packages store.
-        packageFields = { G19: 'No' };
-      } else {
-        if (body.package.coverType !== String(requestItem.fields.E1 ?? '') ||
-            body.package.vehicleCategory !== String(requestItem.fields.C1 ?? '')) {
+        for (const ref of packageRefs) {
+          const pkg = available.find((candidate) => candidate.packageRef === ref)!;
+          offered.push({ packageRef: ref, ...priceForPackage(pkg, sumInsured) });
+        }
+      }
+
+      // Existing packages only: flag that no new package is in this response.
+      let packageFields: Record<string, unknown> = { G19: 'No' };
+      if (body.newPackage) {
+        const newPackage = body.newPackage;
+        if (newPackage.coverType !== String(requestItem.fields.E1 ?? '') ||
+            newPackage.vehicleCategory !== String(requestItem.fields.C1 ?? '')) {
           throw new ApiError('VALIDATION', 'Package cover and vehicle category must match the request.', {
-            fields: { package: 'Package cover and vehicle category must match the request.' }
+            fields: { newPackage: 'Package cover and vehicle category must match the request.' }
           });
         }
-        if (body.package.sumMin > body.package.sumMax ||
-            sumInsured < body.package.sumMin || sumInsured > body.package.sumMax) {
+        if (newPackage.sumMin > newPackage.sumMax ||
+            sumInsured < newPackage.sumMin || sumInsured > newPackage.sumMax) {
           throw new ApiError('VALIDATION', 'The request sum insured is outside this package range.', {
-            fields: { package: 'Package range must include the request sum insured.' }
+            fields: { newPackage: 'Package range must include the request sum insured.' }
           });
         }
-        const identity = getInsurerIdentity(req);
-        packageRef = `${insurerCode(identity.code || insurerName)}-NEW-${requestNo}`;
-        const premiumRate = body.package.premiumRate;
+        const packageRef = `${insurerCode(identity.code || insurerName)}-NEW-${requestNo}`;
+        const premiumRate = newPackage.premiumRate;
         const premium = (sumInsured * premiumRate) / 100;
-        const taxRate = premium === 0 ? 0 : Number(((body.package.taxes / premium) * 100).toFixed(4));
+        const taxRate = premium === 0 ? 0 : Number(((newPackage.taxes / premium) * 100).toFixed(4));
+        offered.push({
+          packageRef,
+          premium: roundCurrency(premium),
+          taxes: roundCurrency(newPackage.taxes),
+          total: roundCurrency(premium + newPackage.taxes)
+        });
         packageFields = {
           G7: insurerName,
           G8: packageRef,
-          G9: body.package.name,
-          G10: body.package.vehicleCategory,
-          G11: body.package.coverType,
-          G12: body.package.sumMin,
-          G13: body.package.sumMax,
+          G9: newPackage.name,
+          G10: newPackage.vehicleCategory,
+          G11: newPackage.coverType,
+          G12: newPackage.sumMin,
+          G13: newPackage.sumMax,
           G14: premiumRate,
           G15: taxRate,
-          G16: body.package.excess,
-          G17: body.package.standardCovers,
-          G18: body.package.validUntil,
+          G16: newPackage.excess,
+          G17: newPackage.standardCovers,
+          G18: newPackage.validUntil,
           G19: 'Yes',
-          G21: body.package.optionalCovers
+          G21: newPackage.optionalCovers
         };
         if (FIELD_MAP[CURRENT_PACKAGE_INSURER_CODE]) {
           packageFields[CURRENT_PACKAGE_INSURER_CODE] = identity.code;
@@ -232,20 +250,21 @@ export function createInsurerRoutes(
       }));
 
       const user = getSessionUser(req);
+      const respondedAt = new Date().toISOString();
       try {
-        await offersRepository.save({
+        await offersRepository.replace(requestNo, offered.map((offer) => ({
           requestNo,
           insurer: insurerName,
-          packageRef,
+          ...offer,
           respondedBy: user.email || user.name,
-          respondedAt: new Date().toISOString()
-        });
+          respondedAt
+        })));
       } catch (error) {
         // The WH24 task is already complete, so a retry would be refused. Log enough to repair it.
-        console.error('Insurer response was completed in WorkHub24 but the offer could not be stored.', {
+        console.error('Insurer response was completed in WorkHub24 but the offers could not be stored.', {
           requestNo,
           insurer: insurerName,
-          packageRef,
+          packageRefs: offered.map((offer) => offer.packageRef),
           error: error instanceof Error ? error.message : String(error)
         });
         throw error;

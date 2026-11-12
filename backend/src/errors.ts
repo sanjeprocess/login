@@ -3,6 +3,10 @@ export type ApiErrorCode =
   | 'NOT_AUTHORISED'
   | 'ALREADY_SUBMITTED'
   | 'REQUEST_CLOSED'
+  /** The previous step was just completed; WorkHub24 has not opened this step's task yet. */
+  | 'PENDING'
+  /** The request has not reached this step. */
+  | 'NOT_READY'
   | 'OTP_INCORRECT'
   | 'OTP_EXPIRED'
   | 'OTP_LOCKED'

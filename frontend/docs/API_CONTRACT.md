@@ -20,7 +20,9 @@ Any non-2xx response returns:
 | LINK_INVALID | 404 | Request No unknown or link expired | Link error page |
 | NOT_AUTHORISED | 403 | User not linked to this request (e.g. insurer not selected) | Link error page |
 | REQUEST_CLOSED | 410 | Request already closed | Link error page |
-| ALREADY_SUBMITTED | 409 | Step already done | Reloads and shows the submitted view |
+| ALREADY_SUBMITTED | 409 | Step already done: status (A3) is past this screen's step | Reloads and shows the submitted view |
+| PENDING | 409 | The previous step was just completed by the backend, but WorkHub24 has not opened this step's task yet (e.g. while it sends the customer SMS). `message` says what is happening | Shows the message; re-checks every 3 s for up to 2 min, then "This is taking longer than usual…" |
+| NOT_READY | 409 | Status (A3) has not reached this screen's step | Link error page |
 | OTP_INCORRECT | 400 | Wrong code; include `attemptsLeft` | Error + attempts left |
 | OTP_LOCKED | 429 | 3 wrong attempts | Must request a new code |
 | OTP_EXPIRED | 400 | Code older than 5 minutes | Must request a new code |
@@ -89,19 +91,20 @@ Response (`InsurerResponseView`):
 ### POST /insurer/requests/{requestNo}/response
 
 ```json
-{ "mode": "stored", "packageRef": "A-COMP-STD", "remarks": "..." }
+{
+  "packageRefs": ["A-COMP-STD", "A-COMP-PLUS"],
+  "newPackage": { "name": "...", "coverType": "Comprehensive", "vehicleCategory": "Motor car", "sumMin": 5000000, "sumMax": 12000000, "premiumRate": 2.95, "taxes": 52000, "excess": 20000, "standardCovers": "...", "optionalCovers": ["SRCC"], "validUntil": "2026-12-31" },
+  "remarks": "..."
+}
 ```
 
-or
-
-```json
-{ "mode": "new", "remarks": "...", "package": { "name": "...", "coverType": "Comprehensive", "vehicleCategory": "Motor car", "sumMin": 5000000, "sumMax": 12000000, "premiumRate": 2.95, "taxes": 52000, "excess": 20000, "standardCovers": "...", "optionalCovers": ["SRCC"], "validUntil": "2026-12-31" } }
-```
+`packageRefs` lists any of the insurer's recommended packages; `newPackage` is optional. At least one package is required in total (otherwise 422 `VALIDATION`).
 
 The backend:
 
-1. adds an H2 Offered Packages row on the WF-01 item, with Is New Package = Yes for `mode: "new"`;
-2. completes the "Awaiting Insurer Responses" task (step 4.0) once H2 rows equal G1 (Webform Insurer Count).
+1. writes the new-package fields (G7 to G21, Is New Package = Yes) on the WF-01 item when `newPackage` is sent, otherwise Is New Package = No;
+2. sets status (A3) to Awaiting Selection and completes the "Awaiting Insurer Responses" task;
+3. stores every package as a separate offer (`backend/data/offers.json`), with its premium, taxes and total for the request's sum insured. Screen 3 lists them all.
 
 Response: 204.
 

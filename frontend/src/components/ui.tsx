@@ -388,7 +388,19 @@ export function Loading({ text = 'Loading' }: { text?: string }) {
   );
 }
 
-export function NextSteps({ items }: { items: { title: string; text: string }[] }) {
+/** While WorkHub24 opens the next step (PENDING): the step's message, then a fallback after 2 minutes. */
+export function PendingNotice({ pending }: { pending: { message: string; slow: boolean } }) {
+  if (pending.slow) {
+    return (
+      <div className="summary" role="alert">
+        <strong>This is taking longer than usual. Refresh in a minute or contact the broker.</strong>
+      </div>
+    );
+  }
+  return <Loading text={pending.message} />;
+}
+
+export function NextSteps({ items }: { items: { title: string; text?: string }[] }) {
   return (
     <ol className="next" style={{ marginTop: 28 }}>
       {items.map((it, i) => (
@@ -396,7 +408,7 @@ export function NextSteps({ items }: { items: { title: string; text: string }[] 
           <span className="n">{pad2(i + 1)}</span>
           <div>
             <strong>{it.title}</strong>
-            <p>{it.text}</p>
+            {it.text ? <p>{it.text}</p> : null}
           </div>
         </li>
       ))}

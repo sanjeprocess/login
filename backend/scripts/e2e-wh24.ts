@@ -19,7 +19,7 @@ import { getItemByRequestNo } from '../src/services/requestService.js';
 import type { PackageRow } from '../src/services/matching.js';
 import { ApiError } from '../src/errors.js';
 import { HttpWorkHub24Client } from '../src/wh24/httpClient.js';
-import type { SessionUser } from '../src/types.js';
+import type { InsurerResponseInput, NewPackageInput, SessionUser } from '../src/types.js';
 import { REQUEST_STATUS, type RequestStatus } from '../src/wh24/fields.js';
 import { FINANCE_EMAIL, buildSampleRequest, isoDate as today, loadFinanceUser, maskLast3, pickTestPackage } from './sampleRequest.js';
 const TASK_NAMES = [
@@ -246,7 +246,10 @@ try {
   if ((await openTask(cardId)) !== 'Awaiting Insurer Responses') await waitForEnterOrTask(cardId);
 
   // --- Screen 2 ---
-  await record('3 Screen 2: insurer offers stored package', cardId, `package=${pkg.packageRef}`, REQUEST_STATUS.awaitingSelection, async () => {
+  // Two packages are offered: the test package plus a second matching stored package, or a new
+  // package when the insurer has only one match (WorkHub24 then adds it to the packages view).
+  let offeredRefs: string[] = [];
+  await record('3 Screen 2: insurer offers 2 packages', cardId, () => `packages=${offeredRefs.join(', ')}`, REQUEST_STATUS.awaitingSelection, async () => {
     const before = await openTask(cardId);
     if (before !== 'Awaiting Insurer Responses') throw new StepFailure(`Open task is ${before ?? '(none)'}.`, 'open task "Awaiting Insurer Responses"');
     // Broker Review is a WorkHub24 step and must not change the status any more.
@@ -258,8 +261,19 @@ try {
     expectHttp(view, 200, 'GET Screen 2');
     const refs = (view.body.recommended ?? []).map((item: { packageRef: string }) => item.packageRef);
     if (!refs.includes(pkg.packageRef)) throw new StepFailure(`Package not recommended (got ${JSON.stringify(refs)}).`, `${pkg.packageRef} in Screen 2 recommended packages`);
+    const second = refs.find((ref: string) => ref !== pkg.packageRef);
+    const body: InsurerResponseInput = { packageRefs: second ? [pkg.packageRef, second] : [pkg.packageRef] };
+    if (!second) {
+      body.newPackage = {
+        name: 'E2E Test Package', coverType: pkg.coverType as NewPackageInput['coverType'], vehicleCategory: pkg.vehicleCategory,
+        sumMin: Math.max(1, Math.floor(sumInsured / 2)), sumMax: sumInsured * 2, premiumRate: 3, taxes: Math.round(sumInsured * 0.003),
+        excess: 25000, standardCovers: 'Own damage, theft, third party liability', optionalCovers: [], validUntil: today(30)
+      };
+    }
+    offeredRefs = [...body.packageRefs, ...(body.newPackage ? ['(new package)'] : [])];
+    console.log(`      offering: ${offeredRefs.join(', ')}`);
     const submit = await request(app).post(`/api/insurer/requests/${requestNo}/response`).set('Authorization', `Bearer ${insurerToken}`)
-      .send({ mode: 'stored', packageRef: pkg.packageRef });
+      .send(body);
     expectHttp(submit, 204, 'POST Screen 2 response');
     const after = await waitForTask(cardId, 'Awaiting Package Selection', TASK_WAIT_MS);
     if (after !== 'Awaiting Package Selection') throw new StepFailure(`Open task is ${after ?? '(none)'}.`, 'open task "Awaiting Package Selection"');
@@ -272,7 +286,10 @@ try {
     expectHttp(offers, 200, 'GET Screen 3 offers');
     const list = (offers.body.offers ?? []) as { insurer: string; packageRef: string; total: number }[];
     offerCount = list.length;
-    console.log(`      offers: ${offerCount}`);
+    console.log(`      offers: ${offerCount} (${list.map((item) => item.packageRef).join(', ')})`);
+    if (offerCount !== 2) {
+      throw new StepFailure(`Screen 3 lists ${offerCount} offers.`, 'offers=2 (both packages offered on Screen 2)', { status: offers.status, body: list.map((item) => item.packageRef) });
+    }
     const offer = list.find((item) => item.packageRef === pkg.packageRef);
     if (!offer) throw new StepFailure('Offered package missing from Screen 3.', `offer with packageRef ${pkg.packageRef}`, { status: offers.status, body: list.map((item) => item.packageRef) });
     const select = await request(app).post(`/api/finance/requests/${requestNo}/select`).set('Authorization', `Bearer ${financeToken}`)

@@ -7,7 +7,7 @@ import { FileDrop } from '../components/FileDrop';
 import { Layout } from '../components/Layout';
 import { LinkError } from '../components/LinkError';
 import { OtpGate } from '../components/OtpGate';
-import { Actions, Button, Card, DefList, ErrorSummary, GroupHead, Guide, Loading, NextSteps, SecTitle, TextAreaField, TextField, type FieldError } from '../components/ui';
+import { Actions, Button, Card, DefList, ErrorSummary, GroupHead, Guide, Loading, NextSteps, PendingNotice, SecTitle, TextAreaField, TextField, type FieldError } from '../components/ui';
 import { focusSummary, useForm, type Rule } from '../lib/form';
 import { dateTime, longDate, money } from '../lib/format';
 import { sessionKey, useSession } from '../lib/session';
@@ -25,7 +25,7 @@ export function BindingPage() {
 
 function Binding({ requestNo, session, onSessionEnd }: { requestNo: string; session: Session; onSessionEnd: () => void }) {
   const api = useApi();
-  const { data, error, loading } = useLoad(() => api.getBinding(session.token, requestNo), [requestNo, session.token]);
+  const { data, error, loading, pending } = useLoad(() => api.getBinding(session.token, requestNo), [requestNo, session.token]);
   const [submitted, setSubmitted] = useState<NonNullable<BindingView['submitted']>>();
   const partner = [session.user.insurer, session.user.department].filter(Boolean).join(' · ');
   const sess = { email: session.user.email, expiresAt: session.expiresAt, scope: `This link is for ${requestNo} only` };
@@ -36,6 +36,12 @@ function Binding({ requestNo, session, onSessionEnd }: { requestNo: string; sess
   }, [error, onSessionEnd]);
   if (error?.code === 'SESSION_EXPIRED') return null;
   if (error) return <LinkError code={error.code} requestNo={requestNo} />;
+  if (pending)
+    return (
+      <Layout hero={hero} partner={partner} session={sess}>
+        <PendingNotice pending={pending} />
+      </Layout>
+    );
   if (loading || !data)
     return (
       <Layout hero={hero} partner={partner} session={sess}>
@@ -49,25 +55,29 @@ function Binding({ requestNo, session, onSessionEnd }: { requestNo: string; sess
 
 function BindingDone({ view, partner }: { view: BindingView; partner: string }) {
   const s = view.submitted!;
+  // What WorkHub24 does after binding. Payment is not part of the pilot (config.paymentEnabled).
+  const steps = [
+    { title: 'The customer gets an SMS that the policy is issued' },
+    { title: 'The finance partner gets the policy by email' },
+    ...(config.paymentEnabled
+      ? [{ title: 'You confirm the premium payment', text: 'You will get an email with a link to record the payment once it is received.' }]
+      : []),
+  ];
   return (
-    <Layout wide partner={partner} hero={{ eyebrow: `Request ${view.request.requestNo} · ${view.insurerName}`, title: 'Policy submitted.', lede: 'The finance partner and the broker have been notified.' }}>
+    <Layout wide partner={partner} hero={{ eyebrow: `Request ${view.request.requestNo} · ${view.insurerName}`, title: 'Policy submitted.', lede: 'The customer and the finance partner have been notified.' }}>
       <div className="refno">
         <span className="eyebrow">Policy number</span>
-        <span className="num">{s.policyNumber}</span>
+        {/* The policy number the insurer typed on this screen (WF-01 J3 policyNumber), never the request number. */}
+        <span className="num" data-testid="policy-number">{s.policyNumber}</span>
         <p>
           Valid {longDate(view.policyStartDate)} to {longDate(s.expiryDate)} · {s.documents} document{s.documents === 1 ? '' : 's'} uploaded · Submitted {dateTime(s.submittedAt)}
         </p>
       </div>
       <div>
         <h2 className="sec-title" style={{ fontSize: 'clamp(28px,3vw,40px)' }}>
-          What happens next<sup>(01–02)</sup>
+          What happens next<sup>(01–{String(steps.length).padStart(2, '0')})</sup>
         </h2>
-        <NextSteps
-          items={[
-            { title: 'The finance partner gets the policy confirmation', text: 'The broker is notified at the same time.' },
-            { title: 'You confirm the premium payment', text: 'You will get an email with a link to record the payment once it is received.' },
-          ]}
-        />
+        <NextSteps items={steps} />
       </div>
     </Layout>
   );

@@ -10,4 +10,6 @@ export const config = {
   sessionSeconds: 30 * 60,
   otpLength: 6,
   maxFileBytes: 10 * 1024 * 1024,
+  /** Premium payment step (T-06). Not part of the pilot: off unless VITE_PAYMENT_ENABLED=true. */
+  paymentEnabled: String(env.VITE_PAYMENT_ENABLED ?? 'false') === 'true',
 };

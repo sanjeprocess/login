@@ -8,6 +8,7 @@ const MESSAGES: Partial<Record<ApiErrorCode, [string, string, string]>> = {
   LINK_INVALID: ['Link invalid or expired', 'This link has expired or is not valid.', 'Open the most recent email about this request. If that link has also expired, contact the broker for a new one.'],
   NOT_AUTHORISED: ['Not authorised', 'This request is not assigned to you.', 'Check that you signed in with the email your company registered with the broker.'],
   ALREADY_SUBMITTED: ['Already submitted', 'This step has already been completed for this request.', 'Contact the broker if something needs to change.'],
+  NOT_READY: ['Not ready yet', 'This step is not open yet for this request.', 'You will get an email when it is ready. Contact the broker if you expected it already.'],
   REQUEST_CLOSED: ['Request closed', 'This request is closed.', 'The broker closed this request, so no further action is needed.'],
   NETWORK: ['Connection problem', 'We could not reach the server.', 'Check your connection and reload the page.'],
 };

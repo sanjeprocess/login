@@ -7,7 +7,7 @@ import { Layout } from '../components/Layout';
 import { LinkError } from '../components/LinkError';
 import { OtpGate } from '../components/OtpGate';
 import { OtpInput } from '../components/OtpInput';
-import { Actions, Button, Callout, Card, DefList, Guide, Loading, NextSteps, ProgressBar, SecTitle, TextButton } from '../components/ui';
+import { Actions, Button, Callout, Card, DefList, Guide, Loading, NextSteps, PendingNotice, ProgressBar, SecTitle, TextButton } from '../components/ui';
 import { dateTime, longDate, money, pad2 } from '../lib/format';
 import { sessionKey, useSession } from '../lib/session';
 import { useLoad } from '../lib/useLoad';
@@ -25,7 +25,7 @@ const STAGES = ['Compare and select', 'Customer OTP', 'Confirmed'];
 
 function Compare({ requestNo, session, onSessionEnd }: { requestNo: string; session: Session; onSessionEnd: () => void }) {
   const api = useApi();
-  const { data, error, loading, reload } = useLoad(() => api.getCompare(session.token, requestNo), [requestNo, session.token]);
+  const { data, error, loading, pending, reload } = useLoad(() => api.getCompare(session.token, requestNo), [requestNo, session.token]);
   const [customerVerified, setCustomerVerified] = useState(false);
   const partner = session.user.partner ?? '';
   const sess = { email: session.user.email, expiresAt: session.expiresAt, scope: `This link is for ${requestNo} only` };
@@ -35,6 +35,14 @@ function Compare({ requestNo, session, onSessionEnd }: { requestNo: string; sess
   }, [error, onSessionEnd]);
   if (error?.code === 'SESSION_EXPIRED') return null;
   if (error) return <LinkError code={error.code} requestNo={requestNo} />;
+  // After Select, WorkHub24 sends the customer SMS before code entry opens (and likewise after
+  // the insurer responds): the backend reports PENDING and useLoad re-checks every 3 seconds.
+  if (pending)
+    return (
+      <Layout partner={partner} session={sess} hero={{ eyebrow: `Request ${requestNo}`, title: pending.slow ? 'Still working on it.' : 'One moment.', lede: pending.message }}>
+        <PendingNotice pending={pending} />
+      </Layout>
+    );
   if (loading || !data)
     return (
       <Layout partner={partner} session={sess} hero={{ eyebrow: `Request ${requestNo}`, title: 'Compare packages.', lede: 'Loading the packages insurers sent for this request.' }}>
@@ -260,6 +268,8 @@ function CustomerOtp(p: { view: CompareView; token: string; partner: string; ses
       const er = e2 as ApiError;
       if (er.code === 'SESSION_EXPIRED') return p.onSessionEnd();
       if (er.code === 'OTP_LOCKED') setLocked(true);
+      // After 3 wrong codes, WorkHub24 is still sending the new code.
+      if (er.code === 'PENDING') return setMsg('The new code is still being sent to the customer. Try again in a moment.');
       setMsg(er.message || 'The code could not be checked. Try again.');
     } finally {
       setBusy(false);

@@ -52,7 +52,7 @@ function InsurerResponse({ requestNo, session, onSessionEnd }: { requestNo: stri
   const { data, error, loading } = useLoad(() => api.getInsurerResponse(session.token, requestNo), [requestNo, session.token]);
   const partner = [session.user.insurer, session.user.department].filter(Boolean).join(' · ');
   const sess = { email: session.user.email, expiresAt: session.expiresAt, scope: `This link is for ${requestNo} only` };
-  const hero = { eyebrow: `Request ${requestNo} · ${session.user.insurer ?? ''}`, title: 'Send your package.', lede: 'Pick one of your stored packages that matches this request, or enter a new one. Your response goes to the broker.' };
+  const hero = { eyebrow: `Request ${requestNo} · ${session.user.insurer ?? ''}`, title: 'Send your packages.', lede: 'Tick the stored packages that you want to offer for this request, add a new one, or both. Your response goes to the broker.' };
 
   useEffect(() => {
     if (error?.code === 'SESSION_EXPIRED') onSessionEnd();
@@ -71,9 +71,9 @@ function InsurerResponse({ requestNo, session, onSessionEnd }: { requestNo: stri
 
 function Submitted({ view, partner }: { view: InsurerResponseView; partner: string }) {
   const s = view.submission!;
-  const pk = s.package;
+  const several = s.packages.length > 1;
   return (
-    <Layout partner={partner} hero={{ eyebrow: `Request ${view.request.requestNo} · ${view.insurerName}`, title: 'Response received.', lede: 'The broker has your package. You will get another email if the customer chooses it.' }}>
+    <Layout partner={partner} hero={{ eyebrow: `Request ${view.request.requestNo} · ${view.insurerName}`, title: 'Response received.', lede: `The broker has your ${several ? 'packages' : 'package'}. You will get another email if the customer chooses ${several ? 'one of them' : 'it'}.` }}>
       <div className="aside">
         <SecTitle title="Submitted" num="02" desc="Your response is locked. Contact the broker if something needs to change." />
         <RequestCard r={view.request} />
@@ -82,27 +82,31 @@ function Submitted({ view, partner }: { view: InsurerResponseView; partner: stri
         <Callout tag="Received" variant="ok">
           {s.submittedAt ? `Submitted on ${dateTime(s.submittedAt)} by ${s.submittedBy}` : `Response saved by ${s.submittedBy}.`}
         </Callout>
-        <div className="group-head">
-          <h4>Your package</h4>
-          <span>{pk.packageRef}</span>
-        </div>
-        <DefList
-          rows={[
-            ['Package', pk.name],
-            ['Premium rate', `${pk.premiumRate.toFixed(2)}%`],
-            ['Premium', `LKR ${money(pk.premium)}`],
-            ['Taxes', `LKR ${money(pk.taxes)}`],
-            ['Total premium', `LKR ${money(pk.total)}`],
-            ['Excess', `LKR ${money(pk.excess)}`],
-            ['Standard covers', pk.standardCovers],
-            ['Optional covers', pk.optionalCovers.join(', ') || 'None'],
-            ['Valid until', longDate(pk.validUntil)],
-          ]}
-        />
+        {s.packages.map((pk) => (
+          <div key={pk.packageRef}>
+            <div className="group-head">
+              <h4>{several ? pk.name : 'Your package'}</h4>
+              <span>{pk.packageRef}</span>
+            </div>
+            <DefList
+              rows={[
+                ['Package', pk.name],
+                ['Premium rate', `${pk.premiumRate.toFixed(2)}%`],
+                ['Premium', `LKR ${money(pk.premium)}`],
+                ['Taxes', `LKR ${money(pk.taxes)}`],
+                ['Total premium', `LKR ${money(pk.total)}`],
+                ['Excess', `LKR ${money(pk.excess)}`],
+                ['Standard covers', pk.standardCovers],
+                ['Optional covers', pk.optionalCovers.join(', ') || 'None'],
+                ['Valid until', longDate(pk.validUntil)],
+              ]}
+            />
+          </div>
+        ))}
         <NextSteps
           items={[
-            { title: 'The finance partner compares packages', text: 'They review all insurers’ packages with the customer.' },
-            { title: 'If the customer chooses yours', text: 'You get an email with a link to upload the quotation and policy documents.' },
+            { title: 'The finance partner compares packages', text: 'They review all offered packages with the customer.' },
+            { title: 'If the customer chooses one of yours', text: 'You get an email with a link to upload the quotation and policy documents.' },
           ]}
         />
       </div>
@@ -123,8 +127,8 @@ function ResponseForm(p: {
   const api = useApi();
   const r = p.view.request;
   const empty = p.view.recommended.length === 0;
-  const [mode, setMode] = useState<'stored' | 'new'>(empty ? 'new' : 'stored');
-  const [pick, setPick] = useState(p.view.recommended[0]?.packageRef ?? '');
+  const [addNew, setAddNew] = useState(empty);
+  const [picked, setPicked] = useState<string[]>([]);
   const [optCovers, setOptCovers] = useState<string[]>(r.optionalCovers);
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState('');
@@ -143,7 +147,11 @@ function ResponseForm(p: {
     'r-rem': '',
   });
   const v = f.values;
-  const isNew = mode === 'new';
+  const isNew = addNew;
+  const togglePick = (ref: string) => {
+    setPicked((current) => (current.includes(ref) ? current.filter((x) => x !== ref) : [...current, ref]));
+    setBanner('');
+  };
   const rate = parseFloat(v['n-rate']) || 0;
   const premium = Math.round(((r.sumInsured * rate) / 100) * 100) / 100;
 
@@ -181,6 +189,10 @@ function ResponseForm(p: {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
+    if (!picked.length && !isNew) {
+      setBanner('Choose at least one package, or enter a new package.');
+      return;
+    }
     if (isNew && f.allErrors(R, extra).length) {
       f.setForced(true);
       focusSummary();
@@ -189,36 +201,29 @@ function ResponseForm(p: {
     setBusy(true);
     setBanner('');
     try {
-      let submittedPackage: StoredPackage;
+      // Keep the order the packages are listed in.
+      const chosen = p.view.recommended.filter((pkg) => picked.includes(pkg.packageRef));
+      const submittedPackages: StoredPackage[] = [...chosen];
       if (isNew) {
-        submittedPackage = {
-            packageRef: `${p.view.insurerName.replace(/[^A-Za-z0-9]/g, '').toUpperCase()}-NEW-${p.requestNo}`,
-            name: v['n-name'].trim(),
-            premiumRate: rate,
-            premium,
-            taxes: parseAmount(v['n-tax']),
-            total: Math.round((premium + parseAmount(v['n-tax'])) * 100) / 100,
-            excess: parseAmount(v['n-excess']),
-            validUntil: v['n-valid'],
-            standardCovers: v['n-std'].trim(),
-            optionalCovers: optCovers,
-          };
-      } else {
-        const selectedPackage = p.view.recommended.find((pkg) => pkg.packageRef === pick);
-        if (!selectedPackage) {
-          setBanner('Choose one of the listed packages.');
-          return;
-        }
-        submittedPackage = selectedPackage;
+        submittedPackages.push({
+          packageRef: `${p.view.insurerName.replace(/[^A-Za-z0-9]/g, '').toUpperCase()}-NEW-${p.requestNo}`,
+          name: v['n-name'].trim(),
+          premiumRate: rate,
+          premium,
+          taxes: parseAmount(v['n-tax']),
+          total: Math.round((premium + parseAmount(v['n-tax'])) * 100) / 100,
+          excess: parseAmount(v['n-excess']),
+          validUntil: v['n-valid'],
+          standardCovers: v['n-std'].trim(),
+          optionalCovers: optCovers,
+        });
       }
-      await api.submitInsurerResponse(
-        p.token,
-        p.requestNo,
-        isNew
+      await api.submitInsurerResponse(p.token, p.requestNo, {
+        packageRefs: chosen.map((pkg) => pkg.packageRef),
+        remarks: v['r-rem'].trim() || undefined,
+        ...(isNew
           ? {
-              mode: 'new',
-              remarks: v['r-rem'].trim() || undefined,
-              package: {
+              newPackage: {
                 name: v['n-name'].trim(),
                 coverType: v['n-cover'] as CoverType,
                 vehicleCategory: v['n-cat'],
@@ -232,14 +237,14 @@ function ResponseForm(p: {
                 validUntil: v['n-valid'],
               },
             }
-          : { mode: 'stored', packageRef: pick, remarks: v['r-rem'].trim() || undefined },
-      );
+          : {}),
+      });
       setSentView({
         ...p.view,
         submission: {
           submittedBy: p.submittedBy,
           submittedAt: new Date().toISOString(),
-          package: submittedPackage,
+          packages: submittedPackages,
         },
       });
     } catch (e2) {
@@ -260,16 +265,16 @@ function ResponseForm(p: {
   return (
     <Layout hero={p.hero} partner={p.partner} session={p.sess}>
       <div className="aside">
-        <SecTitle title="Your response" num="02" desc="One response per request. You cannot edit it after you submit." />
+        <SecTitle title="Your response" num="02" desc="One response per request. You can offer several packages in it, but you cannot edit it after you submit." />
         <Guide
           title="How to respond"
           tips={
             empty
               ? ['None of your stored packages match this vehicle and cover.', 'Enter a new package below. It is saved for future requests that match.', 'Check the premium rate. The premium is calculated from it.']
               : [
-                  'Packages below are your stored packages that match this vehicle, cover type and sum insured.',
-                  'Pick the one you want to offer, or choose “Enter a new package”.',
-                  'A new package is saved and offered automatically on future matching requests.',
+                  'Packages below are your active stored packages that match this vehicle, cover type and sum insured.',
+                  'Tick every package you want to offer. You can also add a new package.',
+                  'Each package is shown to the finance partner as a separate offer.',
                 ]
           }
           ready={['Your current rate card']}
@@ -297,21 +302,12 @@ function ResponseForm(p: {
                 {p.view.recommended.length} match{p.view.recommended.length > 1 ? 'es' : ''} · calculated for LKR {money(r.sumInsured)}
               </span>
             </div>
-            <div className="picker" role="radiogroup" aria-label="Recommended packages">
+            <div className="picker" role="group" aria-label="Recommended packages">
               {p.view.recommended.map((pk) => {
-                const on = !isNew && pick === pk.packageRef;
+                const on = picked.includes(pk.packageRef);
                 return (
                   <label key={pk.packageRef} className={`pick${on ? ' on' : ''}`}>
-                    <input
-                      type="radio"
-                      name="pkg"
-                      checked={on}
-                      onChange={() => {
-                        setMode('stored');
-                        setPick(pk.packageRef);
-                        f.setForced(false);
-                      }}
-                    />
+                    <input type="checkbox" name="pkg" value={pk.packageRef} checked={on} onChange={() => togglePick(pk.packageRef)} />
                     <div>
                       <div className="top">
                         <span>
@@ -352,10 +348,18 @@ function ResponseForm(p: {
                 );
               })}
               <label className={`pick newpkg${isNew ? ' on' : ''}`}>
-                <input type="radio" name="pkg" checked={isNew} onChange={() => setMode('new')} />
+                <input
+                  type="checkbox"
+                  checked={isNew}
+                  onChange={() => {
+                    setAddNew(!isNew);
+                    setBanner('');
+                    f.setForced(false);
+                  }}
+                />
                 <div>
-                  <span className="name">None of these: enter a new package</span>
-                  <div className="covers">It will be saved for future matching requests.</div>
+                  <span className="name">Also enter a new package</span>
+                  <div className="covers">It is offered with any packages ticked above, and saved for future matching requests.</div>
                 </div>
               </label>
             </div>
@@ -410,8 +414,8 @@ function ResponseForm(p: {
             full
           />
         </div>
-        <Callout tag="Before you submit">Your package is shown to the finance partner next to other insurers’ packages. Check the total premium and validity date.</Callout>
-        <Actions left={<span className="note">One response per request</span>}>
+        <Callout tag="Before you submit">Each package you offer is shown to the finance partner as a separate option. Check the total premiums and validity dates.</Callout>
+        <Actions left={<span className="note">{picked.length + (isNew ? 1 : 0)} package{picked.length + (isNew ? 1 : 0) === 1 ? '' : 's'} selected · one response per request</span>}>
           <Button loading={busy}>Submit response</Button>
         </Actions>
       </form>

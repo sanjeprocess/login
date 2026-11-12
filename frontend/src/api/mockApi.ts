@@ -156,38 +156,42 @@ export class MockApi implements GatewayApi {
     this.checkToken(token);
     this.checkRequest(requestNo);
     if (this.s.insurerSubmission) return this.fail(new ApiError('ALREADY_SUBMITTED'));
-    let pkg: StoredPackage;
-    if (input.mode === 'stored') {
-      const found = PACKAGES.find((p) => p.packageRef === input.packageRef);
-      if (!found) return this.fail(new ApiError('VALIDATION', 'Choose a package.'));
-      pkg = found;
-    } else {
-      const premium = Math.round((SUMMARY.sumInsured * input.package.premiumRate) / 100 * 100) / 100;
-      pkg = {
-        packageRef: 'A-NEW-' + Date.now().toString().slice(-4),
-        name: input.package.name,
-        premiumRate: input.package.premiumRate,
-        premium,
-        taxes: input.package.taxes,
-        total: premium + input.package.taxes,
-        excess: input.package.excess,
-        validUntil: input.package.validUntil,
-        standardCovers: input.package.standardCovers,
-        optionalCovers: input.package.optionalCovers,
-      };
+    const packages: StoredPackage[] = [];
+    for (const ref of new Set(input.packageRefs)) {
+      const found = PACKAGES.find((p) => p.packageRef === ref);
+      if (!found) return this.fail(new ApiError('VALIDATION', 'Selected package not found for insurer.'));
+      packages.push(found);
     }
-    this.s.insurerSubmission = { submittedBy: MOCK.insurerEmail, submittedAt: new Date().toISOString(), package: pkg };
+    if (input.newPackage) {
+      const n = input.newPackage;
+      const premium = Math.round((SUMMARY.sumInsured * n.premiumRate) / 100 * 100) / 100;
+      packages.push({
+        packageRef: 'A-NEW-' + Date.now().toString().slice(-4),
+        name: n.name,
+        premiumRate: n.premiumRate,
+        premium,
+        taxes: n.taxes,
+        total: premium + n.taxes,
+        excess: n.excess,
+        validUntil: n.validUntil,
+        standardCovers: n.standardCovers,
+        optionalCovers: n.optionalCovers,
+      });
+    }
+    if (!packages.length) return this.fail(new ApiError('VALIDATION', 'Choose at least one package or enter a new one.'));
+    this.s.insurerSubmission = { submittedBy: MOCK.insurerEmail, submittedAt: new Date().toISOString(), packages };
     await this.wait(null);
   }
 
   private offers(): Offer[] {
-    const a = this.s.insurerSubmission?.package ?? PACKAGES[0];
-    const mine: Offer = {
+    // Every package Insurer A offered on Screen 2 is a separate offer.
+    const offered = this.s.insurerSubmission?.packages ?? [PACKAGES[0]];
+    const mine: Offer[] = offered.map((a) => ({
       insurer: 'Insurer A', source: 'webform', packageRef: a.packageRef, packageName: a.name, premium: a.premium, taxes: a.taxes,
       total: a.total, sumInsured: SUMMARY.sumInsured, excess: a.excess, standardCovers: a.standardCovers, optionalCovers: a.optionalCovers,
       validUntil: a.validUntil, remarks: 'Inspection waived for vehicles under 8 years old.',
-    };
-    return [...OTHER_OFFERS, mine].sort((x, y) => x.total - y.total);
+    }));
+    return [...OTHER_OFFERS, ...mine].sort((x, y) => x.total - y.total);
   }
 
   async getCompare(token: string, requestNo: string): Promise<CompareView> {

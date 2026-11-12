@@ -311,8 +311,7 @@ export class FakeWorkHub24Client implements WorkHub24Client {
     const item = this.items.get(String(cardId));
     if (!item) throw new Error(`Card ${cardId} not found`);
     const taskId = `fake-task-${this.nextTaskSequence++}`;
-    item.taskId = taskId;
-    item.taskName = taskName === 'Awaiting Insurer Responses'
+    const nextTaskName = taskName === 'Awaiting Insurer Responses'
       ? 'Awaiting Package Selection'
       : taskName === 'Awaiting Package Selection'
         ? 'Awaiting OTP Verification'
@@ -321,6 +320,18 @@ export class FakeWorkHub24Client implements WorkHub24Client {
           : taskName === 'Awaiting OTP Verification'
             ? 'Awaiting Policy Upload'
             : undefined;
+    const openNext = () => {
+      item.taskId = taskId;
+      item.taskName = nextTaskName;
+    };
+    if (this.nextTaskDelayMs > 0 && nextTaskName) {
+      // Like WorkHub24 running automated steps (e.g. the customer SMS) before the next task exists.
+      item.taskId = undefined;
+      item.taskName = undefined;
+      setTimeout(openNext, this.nextTaskDelayMs);
+    } else {
+      openNext();
+    }
     item.openTask = { taskId, stepId: taskName };
     // Status (A3) is set by the backend, never by the workflow.
     item.lastUpdatedDate = new Date().toISOString();
@@ -347,6 +358,9 @@ export class FakeWorkHub24Client implements WorkHub24Client {
       });
     });
   }
+
+  /** Tests: after a WF-01 task is completed, the next task appears only after this many ms. */
+  nextTaskDelayMs = 0;
 
   /** Tests: make the next WF-01 task completion fail after its card update succeeded. */
   failNextTaskCompletion = false;

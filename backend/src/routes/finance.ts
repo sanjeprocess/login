@@ -65,7 +65,10 @@ function toWebformOffers(
       });
       return [];
     }
-    const breakdown = priceForPackage(pkg, sumInsured);
+    // The figures stored with the offer are what the insurer offered; older offers have none.
+    const breakdown = offer.premium !== undefined && offer.taxes !== undefined && offer.total !== undefined
+      ? { premium: offer.premium, taxes: offer.taxes, total: offer.total }
+      : priceForPackage(pkg, sumInsured);
     return [{
       // The offers store records which insurer responded; the package row may only carry a code.
       insurer: offer.insurer || pkg.insurerName,

@@ -65,9 +65,10 @@ export function normalizePackageRow(row: Record<string, unknown>): PackageRow {
   };
 }
 
+/** Matched by insurerCode; the name is used only when no code is known. */
 export function packageBelongsTo(pkg: PackageRow, insurer: { name: string; code?: string }): boolean {
-  return (Boolean(insurer.name) && pkg.insurerName === insurer.name) ||
-    (Boolean(insurer.code) && pkg.insurerCode === insurer.code);
+  if (insurer.code) return pkg.insurerCode === insurer.code;
+  return Boolean(insurer.name) && pkg.insurerName === insurer.name;
 }
 
 /** Premium = sumInsured x premiumRate / 100; taxes = premium x taxRate / 100. */
