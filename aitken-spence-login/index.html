@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Sign in · Aitken Spence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,500;0,8..60,600;1,8..60,600&display=swap" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <!-- Brand panel -->
+    <aside class="brand-panel" aria-hidden="false">
+      <svg class="gem" viewBox="0 0 400 560" aria-hidden="true">
+        <defs>
+          <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#4A90D9" stop-opacity=".55" />
+            <stop offset="1" stop-color="#1E5FA8" stop-opacity=".15" />
+          </linearGradient>
+          <linearGradient id="g2" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#2F7BC8" stop-opacity=".45" />
+            <stop offset="1" stop-color="#0E3F7A" stop-opacity=".1" />
+          </linearGradient>
+        </defs>
+        <g stroke="#7FB2E8" stroke-opacity=".35" stroke-width="1">
+          <polygon points="210,0 0,182 105,182" fill="url(#g2)" />
+          <polygon points="210,0 105,182 312,182" fill="url(#g1)" />
+          <polygon points="210,0 312,182 400,120 400,182" fill="url(#g2)" />
+          <polygon points="0,182 105,182 210,556" fill="url(#g2)" />
+          <polygon points="105,182 312,182 210,556" fill="url(#g1)" />
+          <polygon points="312,182 400,182 400,300 210,556" fill="url(#g2)" />
+        </g>
+      </svg>
+
+      <div class="logo">
+        <svg viewBox="0 0 20 24" width="18" height="22" aria-hidden="true">
+          <polygon points="10,0 0,8 10,24 20,8" fill="#5BB8F5" />
+          <polygon points="10,0 5,8 15,8" fill="#A9DBFF" />
+          <polygon points="5,8 15,8 10,24" fill="#2E8FD8" />
+        </svg>
+        <span>Aitken Spence</span>
+      </div>
+
+      <div class="brand-copy">
+        <h1>Welcome back to the team.</h1>
+        <p class="lede">Sign in with your User ID or registered mobile number. We'll send a one-time code to keep your account secure.</p>
+      </div>
+    </aside>
+
+    <!-- Form panel -->
+    <main class="form-panel">
+      <div class="logo logo-mobile">
+        <svg viewBox="0 0 20 24" width="16" height="20" aria-hidden="true">
+          <polygon points="10,0 0,8 10,24 20,8" fill="#2E8FD8" />
+          <polygon points="10,0 5,8 15,8" fill="#5BB8F5" />
+          <polygon points="5,8 15,8 10,24" fill="#0B5CAD" />
+        </svg>
+        <span>Aitken Spence</span>
+      </div>
+
+      <!-- Step 1: Identifier -->
+      <section class="card" id="step-id" aria-labelledby="t-id">
+        <div class="icon-tile" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+        </div>
+        <h2 id="t-id">Sign in</h2>
+        <p class="sub">Choose how you'd like to receive your one-time code.</p>
+
+        <div class="tabs" role="tablist" aria-label="Sign in with">
+          <button type="button" role="tab" id="tab-emp" aria-selected="true" data-mode="emp">User ID</button>
+          <button type="button" role="tab" id="tab-phone" aria-selected="false" data-mode="phone">Phone number</button>
+        </div>
+
+        <form id="form-id" novalidate>
+          <div class="field" id="field-emp">
+            <label for="emp-id">User ID</label>
+            <div class="input-wrap">
+              <span class="prefix" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="12" r="2.2"/><path d="M14 10h4M14 14h3"/></svg>
+              </span>
+              <input id="emp-id" name="empId" type="text" autocomplete="username" placeholder="e.g. ASL12345" maxlength="20" />
+            </div>
+          </div>
+
+          <div class="field" id="field-phone" hidden>
+            <label for="phone">Mobile number</label>
+            <div class="input-wrap">
+              <span class="prefix cc" aria-hidden="true">+94</span>
+              <input id="phone" name="phone" type="tel" inputmode="numeric" autocomplete="tel-national" placeholder="77 123 4567" maxlength="12" />
+            </div>
+          </div>
+
+          <p class="error" id="id-error" role="alert" hidden></p>
+
+          <button class="btn" type="submit" id="btn-send" disabled>
+            <span class="btn-label">Send code</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+        </form>
+
+        <p class="foot">Not registered or changed your number? Please contact HR or IT Support.</p>
+      </section>
+
+      <!-- Step 2: OTP -->
+      <section class="card" id="step-otp" aria-labelledby="t-otp" hidden>
+        <div class="icon-tile" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+        </div>
+        <h2 id="t-otp">Enter your code</h2>
+        <p class="sub">We sent a 6-digit code to your registered mobile.</p>
+
+        <div class="employee" aria-label="Employee">
+          <div class="avatar" id="emp-initials" aria-hidden="true"></div>
+          <dl>
+            <div><dt>Name</dt><dd id="emp-name"></dd></div>
+            <div><dt>User ID</dt><dd id="emp-code"></dd></div>
+            <div><dt>Mobile</dt><dd id="sent-to"></dd></div>
+          </dl>
+        </div>
+
+        <form id="form-otp" novalidate>
+          <div class="otp" role="group" aria-label="6-digit code">
+            <input inputmode="numeric" autocomplete="one-time-code" maxlength="1" aria-label="Digit 1" />
+            <input inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 2" />
+            <input inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 3" />
+            <input inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 4" />
+            <input inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 5" />
+            <input inputmode="numeric" autocomplete="off" maxlength="1" aria-label="Digit 6" />
+          </div>
+
+          <p class="error" id="otp-error" role="alert" hidden></p>
+
+          <button class="btn" type="submit" id="btn-verify" disabled>
+            <span class="btn-label">Verify and sign in</span>
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+          </button>
+        </form>
+
+        <div class="row">
+          <button type="button" class="link" id="btn-back">← Change details</button>
+          <button type="button" class="link" id="btn-resend">Resend code</button>
+        </div>
+
+        <p class="foot">The code expires in 5 minutes. You have 3 attempts.</p>
+      </section>
+
+      <!-- Step 3: Success -->
+      <section class="card" id="step-done" aria-labelledby="t-done" hidden>
+        <div class="icon-tile ok" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+        </div>
+        <h2 id="t-done">You're signed in</h2>
+        <p class="sub">Opening your portal…</p>
+        <div class="spinner" aria-hidden="true"></div>
+      </section>
+
+      <p class="secure">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg>
+        Secured with one-time codes. No passwords stored.
+      </p>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
